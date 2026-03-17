@@ -15,9 +15,16 @@ from rich.table import Table
 from hackathon_finder.aggregator import fetch_all
 from hackathon_finder.models import Format, Hackathon
 from hackathon_finder.sources import ALL_SOURCES
+from hackathon_finder.validate import apply_corrections, validate_batch
 
 
 console = Console()
+
+_TIER_ICONS = {
+    "triage": "[bold blue]triage[/]",
+    "investigation": "[bold yellow]investigation[/]",
+    "tokens": "[bold magenta]tokens[/]",
+}
 
 
 def _format_date(h: Hackathon) -> str:
@@ -125,6 +132,12 @@ def display(hackathons: list[Hackathon], show_source: bool = True) -> None:
     console.print(f"\n[dim]{len(hackathons)} hackathons found[/dim]")
 
 
+def _progress_callback(tier: str, message: str) -> None:
+    """Rich console output for validation progress."""
+    icon = _TIER_ICONS.get(tier, f"[dim]{tier}[/]")
+    console.print(f"  {icon}  {message}")
+
+
 async def _run(args: argparse.Namespace) -> None:
     sources = [S() for S in ALL_SOURCES]
 
@@ -137,6 +150,7 @@ async def _run(args: argparse.Namespace) -> None:
     virtual = not args.no_virtual
 
     use_json = getattr(args, "json", False)
+    do_validate = not args.no_validate
 
     if use_json:
         hackathons = await fetch_all(sources, sf=sf, virtual=virtual)
@@ -154,6 +168,29 @@ async def _run(args: argparse.Namespace) -> None:
     before_dt = _normalize_utc(datetime.strptime(args.before, "%Y-%m-%d")) if args.before else None
     if after_dt or before_dt:
         hackathons = _filter_by_date(hackathons, after_dt, before_dt)
+
+    # Validation layer (on by default)
+    if do_validate:
+        from hackathon_finder.oauth import ensure_auth
+        ensure_auth()
+
+        if not use_json:
+            console.print(f"\n[bold]Validating {len(hackathons)} events...[/bold]")
+
+        vresults = await validate_batch(
+            hackathons,
+            skip_curated=False,
+            model=args.model,
+            on_progress=_progress_callback if not use_json else None,
+        )
+        before_count = len(hackathons)
+        hackathons = apply_corrections(hackathons, vresults)
+        rejected = before_count - len(hackathons)
+
+        if not use_json:
+            if rejected > 0:
+                console.print(f"  [bold red]filtered[/]  {rejected} non-hackathon events removed")
+            console.print(f"  [bold green]done[/]  {len(hackathons)} validated hackathons")
 
     # Apply limit (after all filters and sorting)
     if args.limit is not None:
@@ -183,6 +220,8 @@ def main():
     parser.add_argument("--limit", type=int, default=None, metavar="N", help="Show only first N results")
     parser.add_argument("--after", type=str, metavar="YYYY-MM-DD", help="Exclude events starting before this date")
     parser.add_argument("--before", type=str, metavar="YYYY-MM-DD", help="Exclude events starting after this date")
+    parser.add_argument("--no-validate", action="store_true", help="Skip validation layer")
+    parser.add_argument("--model", type=str, default="claude-haiku-4-5-20251001", help="Anthropic model for investigation (default: haiku)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
