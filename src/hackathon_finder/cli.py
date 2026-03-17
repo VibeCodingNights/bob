@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
+from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -44,6 +46,54 @@ def _format_badge(h: Hackathon) -> str:
         parts.append("[blue]UPCOMING[/]")
 
     return " ".join(parts)
+
+
+def _normalize_utc(dt: datetime) -> datetime:
+    """Make a datetime UTC-aware; assume naive datetimes are already UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _filter_by_date(
+    hackathons: list[Hackathon],
+    after: datetime | None,
+    before: datetime | None,
+) -> list[Hackathon]:
+    """Exclude events whose start_date falls outside [after, before]. Events with no start_date are kept."""
+    result = []
+    for h in hackathons:
+        if h.start_date is None:
+            result.append(h)
+            continue
+        start = _normalize_utc(h.start_date)
+        if after and start < after:
+            continue
+        if before and start > before:
+            continue
+        result.append(h)
+    return result
+
+
+def _to_json_obj(h: Hackathon) -> dict:
+    return {
+        "name": h.name,
+        "url": h.url,
+        "source": h.source,
+        "format": h.format.value,
+        "location": h.location,
+        "start_date": h.start_date.isoformat() if h.start_date else None,
+        "end_date": h.end_date.isoformat() if h.end_date else None,
+        "organizer": h.organizer or None,
+        "registration_status": h.registration_status.value,
+        "themes": h.themes,
+        "prize_amount": h.prize_amount or None,
+        "participants": h.participants,
+    }
+
+
+def display_json(hackathons: list[Hackathon]) -> None:
+    print(json.dumps([_to_json_obj(h) for h in hackathons], indent=2))
 
 
 def display(hackathons: list[Hackathon], show_source: bool = True) -> None:
@@ -86,13 +136,32 @@ async def _run(args: argparse.Namespace) -> None:
     sf = not args.no_sf
     virtual = not args.no_virtual
 
-    with console.status("[bold]Fetching hackathons..."):
+    use_json = getattr(args, "json", False)
+
+    if use_json:
         hackathons = await fetch_all(sources, sf=sf, virtual=virtual)
+    else:
+        with console.status("[bold]Fetching hackathons..."):
+            hackathons = await fetch_all(sources, sf=sf, virtual=virtual)
 
     # Apply text filter
     if args.filter:
         q = args.filter.lower()
         hackathons = [h for h in hackathons if q in h.name.lower() or q in h.description.lower()]
+
+    # Apply date range filters
+    after_dt = _normalize_utc(datetime.strptime(args.after, "%Y-%m-%d")) if args.after else None
+    before_dt = _normalize_utc(datetime.strptime(args.before, "%Y-%m-%d")) if args.before else None
+    if after_dt or before_dt:
+        hackathons = _filter_by_date(hackathons, after_dt, before_dt)
+
+    # Apply limit (after all filters and sorting)
+    if args.limit is not None:
+        hackathons = hackathons[: args.limit]
+
+    if use_json:
+        display_json(hackathons)
+        return
 
     display(hackathons)
 
@@ -110,6 +179,10 @@ def main():
     parser.add_argument("--source", type=str, help="Comma-separated sources (devpost,mlh,luma,eventbrite)")
     parser.add_argument("--filter", type=str, help="Filter by keyword in name/description")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show event URLs")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON array")
+    parser.add_argument("--limit", type=int, default=None, metavar="N", help="Show only first N results")
+    parser.add_argument("--after", type=str, metavar="YYYY-MM-DD", help="Exclude events starting before this date")
+    parser.add_argument("--before", type=str, metavar="YYYY-MM-DD", help="Exclude events starting after this date")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 

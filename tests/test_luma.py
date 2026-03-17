@@ -1,0 +1,148 @@
+"""Tests for the Luma source parser."""
+
+
+import pytest
+
+from hackathon_finder.models import Format, Hackathon, RegistrationStatus
+from hackathon_finder.sources.luma import _parse_iso, _parse_luma_event, _is_hackathon
+
+
+class TestParseIso:
+    def test_standard_iso(self):
+        assert _parse_iso("2026-06-01T09:00:00Z") is not None
+
+    def test_empty(self):
+        assert _parse_iso("") is None
+
+    def test_none(self):
+        assert _parse_iso(None) is None
+
+    def test_invalid(self):
+        assert _parse_iso("nope") is None
+
+
+class TestParseLumaEvent:
+    @pytest.fixture
+    def full_entry(self):
+        return {
+            "event": {
+                "name": "SF Hack Night",
+                "url": "sf-hack-night",
+                "api_id": "evt_123",
+                "geo_address_info": {"city": "San Francisco", "region": "CA"},
+                "is_online": False,
+                "start_at": "2026-06-01T18:00:00Z",
+                "end_at": "2026-06-02T06:00:00Z",
+                "cover_url": "https://example.com/cover.png",
+                "description_short": "A great hackathon",
+            },
+            "hosts": [
+                {"name": "Hacker Club"},
+                {"name": "TechCo"},
+            ],
+        }
+
+    def test_full_entry(self, full_entry):
+        h = _parse_luma_event(full_entry)
+        assert h is not None
+        assert h.name == "SF Hack Night"
+        assert h.source == "luma"
+        assert h.format == Format.IN_PERSON
+        assert "San Francisco" in h.location
+        assert h.start_date is not None
+        assert h.end_date is not None
+        assert h.organizer == "Hacker Club, TechCo"
+        assert h.registration_status == RegistrationStatus.OPEN
+        assert h.image_url == "https://example.com/cover.png"
+        assert h.description == "A great hackathon"
+
+    def test_url_uses_url_field(self):
+        entry = {"event": {"name": "T", "url": "my-event"}, "hosts": []}
+        h = _parse_luma_event(entry)
+        assert h.url == "https://luma.com/my-event"
+
+    def test_url_falls_back_to_api_id(self):
+        entry = {"event": {"name": "T", "api_id": "evt_abc"}, "hosts": []}
+        h = _parse_luma_event(entry)
+        assert h.url == "https://luma.com/evt_abc"
+
+    def test_online_event(self):
+        entry = {"event": {"name": "T", "url": "x", "is_online": True}, "hosts": []}
+        h = _parse_luma_event(entry)
+        assert h.format == Format.VIRTUAL
+
+    def test_no_geo_with_location_string(self):
+        entry = {
+            "event": {"name": "T", "url": "x", "location": "My Venue, NYC"},
+            "hosts": [],
+        }
+        h = _parse_luma_event(entry)
+        assert h.location == "My Venue, NYC"
+
+    def test_no_geo_no_location(self):
+        entry = {"event": {"name": "T", "url": "x"}, "hosts": []}
+        h = _parse_luma_event(entry)
+        assert h.location == "Online"
+
+    def test_empty_event_returns_none(self):
+        assert _parse_luma_event({"event": {}}) is None
+
+    def test_missing_event_returns_none(self):
+        assert _parse_luma_event({}) is None
+
+    def test_no_name_returns_none(self):
+        assert _parse_luma_event({"event": {"url": "x"}}) is None
+
+    def test_hosts_limited_to_three(self):
+        entry = {
+            "event": {"name": "T", "url": "x"},
+            "hosts": [{"name": f"H{i}"} for i in range(5)],
+        }
+        h = _parse_luma_event(entry)
+        assert h.organizer == "H0, H1, H2"
+
+    def test_hosts_skip_empty_names(self):
+        entry = {
+            "event": {"name": "T", "url": "x"},
+            "hosts": [{"name": "A"}, {"name": ""}, {"name": "B"}],
+        }
+        h = _parse_luma_event(entry)
+        assert h.organizer == "A, B"
+
+    def test_geo_only_city(self):
+        entry = {
+            "event": {"name": "T", "url": "x", "geo_address_info": {"city": "Austin"}},
+            "hosts": [],
+        }
+        h = _parse_luma_event(entry)
+        assert "Austin" in h.location
+
+
+class TestIsHackathon:
+    def test_hackathon_in_name(self):
+        h = Hackathon(name="SF Hackathon 2026", url="", source="luma")
+        assert _is_hackathon(h)
+
+    def test_hack_night_in_name(self):
+        h = Hackathon(name="Friday Hack Night", url="", source="luma")
+        assert _is_hackathon(h)
+
+    def test_buildathon_in_description(self):
+        h = Hackathon(name="Tech Event", url="", source="luma", description="Join our buildathon!")
+        assert _is_hackathon(h)
+
+    def test_keyword_in_themes(self):
+        h = Hackathon(name="Event", url="", source="luma", themes=["code jam", "AI"])
+        assert _is_hackathon(h)
+
+    def test_non_hackathon(self):
+        h = Hackathon(name="AI Meetup", url="", source="luma", description="Learn about AI")
+        assert not _is_hackathon(h)
+
+    def test_case_insensitive(self):
+        h = Hackathon(name="HACKATHON 2026", url="", source="luma")
+        assert _is_hackathon(h)
+
+    def test_hacking_keyword(self):
+        h = Hackathon(name="Civic Hacking Day", url="", source="luma")
+        assert _is_hackathon(h)
