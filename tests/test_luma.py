@@ -4,7 +4,7 @@
 import pytest
 
 from hackathon_finder.models import Format, Hackathon, RegistrationStatus
-from hackathon_finder.sources.luma import _parse_iso, _parse_luma_event, _is_hackathon
+from hackathon_finder.sources.luma import _parse_iso, _parse_luma_event, _is_hackathon, _hackathon_score
 
 
 class TestParseIso:
@@ -131,8 +131,9 @@ class TestIsHackathon:
         h = Hackathon(name="Tech Event", url="", source="luma", description="Join our buildathon!")
         assert _is_hackathon(h)
 
-    def test_keyword_in_themes(self):
-        h = Hackathon(name="Event", url="", source="luma", themes=["code jam", "AI"])
+    def test_keyword_in_description(self):
+        """Themes aren't checked by structural scorer — keywords must be in name or description."""
+        h = Hackathon(name="Event", url="", source="luma", description="Join the code jam this weekend")
         assert _is_hackathon(h)
 
     def test_non_hackathon(self):
@@ -143,6 +144,66 @@ class TestIsHackathon:
         h = Hackathon(name="HACKATHON 2026", url="", source="luma")
         assert _is_hackathon(h)
 
-    def test_hacking_keyword(self):
-        h = Hackathon(name="Civic Hacking Day", url="", source="luma")
+    def test_hacking_with_duration(self):
+        """'hacking' is a soft keyword (+1), needs duration signal (+2) to pass threshold."""
+        from datetime import datetime, timezone
+        h = Hackathon(
+            name="Civic Hacking Day", url="", source="luma",
+            start_date=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),  # Saturday
+            end_date=datetime(2026, 3, 21, 20, 0, tzinfo=timezone.utc),   # 11h
+        )
         assert _is_hackathon(h)
+
+    def test_hacking_alone_insufficient(self):
+        """'hacking' without structural support doesn't pass threshold."""
+        h = Hackathon(name="Civic Hacking Day", url="", source="luma")
+        assert not _is_hackathon(h)
+
+
+class TestHackathonScore:
+    """Test the structural scoring system directly."""
+
+    def test_strong_keyword_alone(self):
+        h = Hackathon(name="SF Hackathon 2026", url="", source="luma")
+        assert _hackathon_score(h) == 3
+
+    def test_anti_keyword_reduces(self):
+        h = Hackathon(name="Hackathon Happy Hour", url="", source="luma")
+        assert _hackathon_score(h) == 1  # +3 strong, -2 anti
+
+    def test_duration_signal(self):
+        from datetime import datetime, timezone
+        h = Hackathon(
+            name="Tech Event", url="", source="luma",
+            start_date=datetime(2026, 3, 21, 9, 0, tzinfo=timezone.utc),
+            end_date=datetime(2026, 3, 22, 18, 0, tzinfo=timezone.utc),  # 33h
+        )
+        assert _hackathon_score(h) == 4  # +2 (>6h) +1 (>12h) +1 (Saturday)
+
+    def test_conference_anti_keyword_cancels_duration(self):
+        from datetime import datetime, timezone
+        h = Hackathon(
+            name="AI Conference at Stanford", url="", source="luma",
+            start_date=datetime(2026, 3, 19, 9, 0, tzinfo=timezone.utc),   # Thursday
+            end_date=datetime(2026, 3, 20, 21, 0, tzinfo=timezone.utc),    # 36h
+        )
+        score = _hackathon_score(h)
+        assert score < 2  # duration (+3) but conference anti (-2) = 1, doesn't pass
+
+    def test_pure_happy_hour(self):
+        h = Hackathon(name="GTC Happy Hour with Drinks", url="", source="luma")
+        assert _hackathon_score(h) == -2
+
+    def test_weekend_hack_sprint(self):
+        from datetime import datetime, timezone
+        h = Hackathon(
+            name="AI Sprint: 48hr Challenge", url="", source="luma",
+            start_date=datetime(2026, 3, 21, 18, 0, tzinfo=timezone.utc),  # Saturday
+            end_date=datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),    # 48h
+        )
+        score = _hackathon_score(h)
+        assert score >= 2  # soft "sprint"/"challenge" (+1) + >6h (+2) + >12h (+1) + weekend (+1)
+
+    def test_neutral_event_zero(self):
+        h = Hackathon(name="Music and Philosophy of Life", url="", source="luma")
+        assert _hackathon_score(h) == 0

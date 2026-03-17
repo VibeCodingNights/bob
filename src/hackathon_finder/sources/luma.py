@@ -17,10 +17,20 @@ PAGINATED_URL = "https://api2.luma.com/discover/get-paginated-events"
 # SF place ID from the discover page
 SF_PLACE_ID = "discplace-BDj7GNbGlsF7Cka"
 
-_HACK_KEYWORDS = (
-    "hackathon", "hack night", "hack day", "hackon", "buildathon", "codeathon",
-    "code jam", "code fest", "devjam", "build day", "build night", "hacking",
-    "hack week", "hackers", "hackfest",
+_STRONG_KEYWORDS = (
+    "hackathon", "hack night", "hack day", "hack week", "hackfest",
+    "buildathon", "codeathon", "code jam", "devjam",
+)
+_SOFT_KEYWORDS = (
+    "build weekend", "build day", "build night", "code fest",
+    "sprint", "ship day", "hacking", "hackers",
+    "challenge", "jam session",
+)
+_ANTI_KEYWORDS = (
+    "happy hour", "after hours", "afterparty", "party", "social",
+    "meetup", "talk", "lecture", "conference", "summit", "showcase",
+    "exhibit", "comedy", "lounge", "pre-pour", "pitch", "demo day",
+    "networking", "mixer", "brunch", "dinner", "lunch",
 )
 
 
@@ -77,10 +87,48 @@ def _parse_luma_event(entry: dict) -> Hackathon | None:
     )
 
 
+def _hackathon_score(h: Hackathon) -> int:
+    """Structural signal score. Higher = more likely a hackathon.
+
+    Signals:
+      +3  strong keyword in name/description ("hackathon", "hack night", ...)
+      +1  soft keyword ("sprint", "challenge", "build weekend", ...)
+      +2  duration > 6h (hackathons are multi-hour/multi-day)
+      +1  duration > 12h (multi-day events)
+      +1  weekend start (Fri evening, Sat, Sun)
+      -2  anti-keyword ("happy hour", "conference", "party", ...)
+
+    Threshold: >= 2 passes filter.
+    """
+    text = f"{h.name} {h.description}".lower()
+    score = 0
+
+    # Keywords
+    if any(kw in text for kw in _STRONG_KEYWORDS):
+        score += 3
+    if any(kw in text for kw in _SOFT_KEYWORDS):
+        score += 1
+    if any(kw in text for kw in _ANTI_KEYWORDS):
+        score -= 2
+
+    # Duration
+    if h.start_date and h.end_date:
+        hours = (h.end_date - h.start_date).total_seconds() / 3600
+        if hours > 6:
+            score += 2
+        if hours > 12:
+            score += 1
+
+    # Weekend start
+    if h.start_date and h.start_date.weekday() >= 4:  # Fri=4, Sat=5, Sun=6
+        score += 1
+
+    return score
+
+
 def _is_hackathon(h: Hackathon) -> bool:
-    """Heuristic: does this event look like a hackathon?"""
-    text = f"{h.name} {h.description} {' '.join(h.themes)}".lower()
-    return any(kw in text for kw in _HACK_KEYWORDS)
+    """Structural heuristic: composite score >= 2 passes."""
+    return _hackathon_score(h) >= 2
 
 
 class LumaSource(Source):
