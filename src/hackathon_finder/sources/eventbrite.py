@@ -1,7 +1,8 @@
-"""Eventbrite scraper — public search UI, no OAuth needed."""
+"""Eventbrite source — extracts __SERVER_DATA__ from public search page."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -22,103 +23,84 @@ UA = (
 )
 
 
-def _extract_events_from_html(html: str, is_online: bool = False) -> list[Hackathon]:
-    """Extract event data from Eventbrite search results HTML."""
-    results: list[Hackathon] = []
-
-    # Eventbrite embeds structured data as JSON-LD
-    json_ld_blocks = re.findall(
-        r'<script type="application/ld\+json">(.*?)</script>',
-        html,
-        re.DOTALL,
-    )
-
-    import json
-    for block in json_ld_blocks:
+def _parse_date(date_str: str | None, time_str: str | None) -> datetime | None:
+    """Parse Eventbrite date + time strings like '2026-03-24' + '18:00'."""
+    if not date_str:
+        return None
+    combined = date_str
+    if time_str:
+        combined = f"{date_str}T{time_str}"
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
-            data = json.loads(block)
-        except json.JSONDecodeError:
+            return datetime.strptime(combined, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_server_data(html: str) -> dict:
+    """Extract __SERVER_DATA__ JSON from Eventbrite search page."""
+    start_marker = "__SERVER_DATA__ = "
+    idx = html.find(start_marker)
+    if idx < 0:
+        return {}
+    idx += len(start_marker)
+
+    # Walk braces to find the end of the JSON object
+    depth = 0
+    for i, c in enumerate(html[idx:idx + 500_000], idx):
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        if depth == 0:
+            try:
+                return json.loads(html[idx : i + 1])
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _extract_events(html: str, is_online: bool = False) -> list[Hackathon]:
+    """Extract events from Eventbrite's embedded __SERVER_DATA__."""
+    data = _extract_server_data(html)
+    events = data.get("search_data", {}).get("events", {}).get("results", [])
+
+    results: list[Hackathon] = []
+    for ev in events:
+        name = ev.get("name", "")
+        url = ev.get("url", "")
+        if not name or not url:
             continue
 
-        # Can be a single object or list
-        items = data if isinstance(data, list) else [data]
-        for item in items:
-            if item.get("@type") != "Event":
-                continue
+        # Format
+        if is_online or ev.get("is_online_event"):
+            fmt = Format.VIRTUAL
+            location = "Online"
+        else:
+            fmt = Format.IN_PERSON
+            venue = ev.get("primary_venue") or {}
+            addr = venue.get("address") or {}
+            city = addr.get("city", "")
+            region = addr.get("region", "")
+            location = f"{city}, {region}".strip(", ") or venue.get("name", "")
 
-            name = item.get("name", "")
-            if not name:
-                continue
+        # Image
+        image = ev.get("image", {})
+        image_url = image.get("url", "") if isinstance(image, dict) else ""
 
-            url = item.get("url", "")
-            location_data = item.get("location", {})
-
-            if is_online or location_data.get("@type") == "VirtualLocation":
-                fmt = Format.VIRTUAL
-                location_str = "Online"
-            else:
-                fmt = Format.IN_PERSON
-                addr = location_data.get("address", {})
-                city = addr.get("addressLocality", "")
-                region = addr.get("addressRegion", "")
-                location_str = f"{city}, {region}".strip(", ") or location_data.get("name", "")
-
-            start = None
-            if item.get("startDate"):
-                try:
-                    start = datetime.fromisoformat(item["startDate"])
-                except (ValueError, TypeError):
-                    pass
-
-            end = None
-            if item.get("endDate"):
-                try:
-                    end = datetime.fromisoformat(item["endDate"])
-                except (ValueError, TypeError):
-                    pass
-
-            organizer = ""
-            org = item.get("organizer", {})
-            if isinstance(org, dict):
-                organizer = org.get("name", "")
-
-            image = ""
-            if item.get("image"):
-                img = item["image"]
-                image = img if isinstance(img, str) else (img[0] if isinstance(img, list) else "")
-
-            results.append(Hackathon(
-                name=name,
-                url=url,
-                source="eventbrite",
-                format=fmt,
-                location=location_str,
-                start_date=start,
-                end_date=end,
-                organizer=organizer,
-                registration_status=RegistrationStatus.OPEN,
-                image_url=image,
-            ))
-
-    # Fallback: parse event cards if no JSON-LD found
-    if not results:
-        cards = re.findall(
-            r'<a[^>]*href="(https://www\.eventbrite\.com/e/[^"]*)"[^>]*>.*?'
-            r'<h2[^>]*>(.*?)</h2>',
-            html,
-            re.DOTALL,
-        )
-        for url, name in cards:
-            name = re.sub(r"<[^>]+>", "", name).strip()
-            if name:
-                results.append(Hackathon(
-                    name=name,
-                    url=url,
-                    source="eventbrite",
-                    format=Format.VIRTUAL if is_online else Format.IN_PERSON,
-                    location="Online" if is_online else "San Francisco, CA",
-                    registration_status=RegistrationStatus.OPEN,
-                ))
+        results.append(Hackathon(
+            name=name,
+            url=url,
+            source="eventbrite",
+            format=fmt,
+            location=location or "Online",
+            start_date=_parse_date(ev.get("start_date"), ev.get("start_time")),
+            end_date=_parse_date(ev.get("end_date"), ev.get("end_time")),
+            registration_status=RegistrationStatus.OPEN,
+            image_url=image_url,
+            description=ev.get("summary", ""),
+        ))
 
     return results
 
@@ -128,24 +110,29 @@ class EventbriteSource(Source):
 
     async def fetch(self, sf: bool = True, virtual: bool = True) -> list[Hackathon]:
         results: list[Hackathon] = []
+        seen_urls: set[str] = set()
         headers = {"User-Agent": UA}
 
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            # SF in-person
             if sf:
                 try:
                     resp = await client.get(SF_SEARCH, headers=headers)
                     resp.raise_for_status()
-                    results.extend(_extract_events_from_html(resp.text, is_online=False))
+                    for h in _extract_events(resp.text, is_online=False):
+                        if h.url not in seen_urls:
+                            seen_urls.add(h.url)
+                            results.append(h)
                 except Exception as e:
                     logger.warning(f"Eventbrite SF fetch failed: {e}")
 
-            # Virtual
             if virtual:
                 try:
                     resp = await client.get(ONLINE_SEARCH, headers=headers)
                     resp.raise_for_status()
-                    results.extend(_extract_events_from_html(resp.text, is_online=True))
+                    for h in _extract_events(resp.text, is_online=True):
+                        if h.url not in seen_urls:
+                            seen_urls.add(h.url)
+                            results.append(h)
                 except Exception as e:
                     logger.warning(f"Eventbrite online fetch failed: {e}")
 

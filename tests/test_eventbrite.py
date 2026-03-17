@@ -1,198 +1,152 @@
 """Tests for the Eventbrite source parser."""
 
 import json
-from datetime import datetime, timezone, timedelta
 
 import pytest
 
 from hackathon_finder.models import Format, RegistrationStatus
-from hackathon_finder.sources.eventbrite import _extract_events_from_html
+from hackathon_finder.sources.eventbrite import _extract_events, _extract_server_data, _parse_date
 
 
-def _wrap_json_ld(items: list[dict]) -> str:
-    """Wrap JSON-LD items in the expected script tag."""
-    return f'<script type="application/ld+json">{json.dumps(items)}</script>'
-
-
-class TestExtractEventsJsonLD:
-    @pytest.fixture
-    def in_person_event_html(self):
-        event = {
-            "@type": "Event",
-            "name": "SF AI Hackathon",
-            "url": "https://www.eventbrite.com/e/sf-ai-hack",
-            "startDate": "2026-06-15T09:00:00-07:00",
-            "endDate": "2026-06-16T18:00:00-07:00",
-            "location": {
-                "@type": "Place",
-                "name": "Tech Center",
-                "address": {
-                    "addressLocality": "San Francisco",
-                    "addressRegion": "CA",
-                },
-            },
-            "organizer": {"name": "TechOrg"},
-            "image": "https://example.com/img.jpg",
+def _wrap_server_data(events: list[dict], pagination: dict | None = None) -> str:
+    """Build HTML with embedded __SERVER_DATA__."""
+    data = {
+        "search_data": {
+            "events": {
+                "results": events,
+                "pagination": pagination or {"object_count": len(events)},
+            }
         }
-        return _wrap_json_ld([event])
+    }
+    return f"<script>window.__SERVER_DATA__ = {json.dumps(data)};</script>"
 
-    def test_parse_in_person_event(self, in_person_event_html):
-        results = _extract_events_from_html(in_person_event_html, is_online=False)
+
+def _make_event(**overrides) -> dict:
+    """Build a sample Eventbrite event dict."""
+    base = {
+        "name": "SF Hackathon",
+        "url": "https://www.eventbrite.com/e/sf-hackathon-123",
+        "start_date": "2026-06-15",
+        "start_time": "09:00",
+        "end_date": "2026-06-16",
+        "end_time": "18:00",
+        "is_online_event": False,
+        "primary_venue": {
+            "name": "Tech Center",
+            "address": {"city": "San Francisco", "region": "CA"},
+        },
+        "image": {"url": "https://example.com/img.jpg"},
+        "summary": "A weekend hackathon",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestParseDate:
+    def test_date_and_time(self):
+        dt = _parse_date("2026-06-15", "09:00")
+        assert dt is not None
+        assert dt.year == 2026
+        assert dt.month == 6
+        assert dt.hour == 9
+
+    def test_date_only(self):
+        dt = _parse_date("2026-06-15", None)
+        assert dt is not None
+        assert dt.hour == 0
+
+    def test_none_date(self):
+        assert _parse_date(None, "09:00") is None
+
+    def test_empty_date(self):
+        assert _parse_date("", "09:00") is None
+
+    def test_invalid_format(self):
+        assert _parse_date("not-a-date", "09:00") is None
+
+
+class TestExtractServerData:
+    def test_extracts_json(self):
+        html = '<script>window.__SERVER_DATA__ = {"key": "value"};</script>'
+        data = _extract_server_data(html)
+        assert data == {"key": "value"}
+
+    def test_no_server_data(self):
+        data = _extract_server_data("<html><body>Nothing</body></html>")
+        assert data == {}
+
+    def test_malformed_json(self):
+        html = '<script>window.__SERVER_DATA__ = {broken;</script>'
+        data = _extract_server_data(html)
+        assert data == {}
+
+
+class TestExtractEvents:
+    def test_parse_in_person_event(self):
+        html = _wrap_server_data([_make_event()])
+        results = _extract_events(html, is_online=False)
         assert len(results) == 1
         h = results[0]
-        assert h.name == "SF AI Hackathon"
+        assert h.name == "SF Hackathon"
         assert h.source == "eventbrite"
         assert h.format == Format.IN_PERSON
         assert h.location == "San Francisco, CA"
-        pdt = timezone(timedelta(hours=-7))
-        assert h.start_date == datetime(2026, 6, 15, 9, 0, 0, tzinfo=pdt)
+        assert h.start_date is not None
+        assert h.start_date.month == 6
+        assert h.start_date.hour == 9
         assert h.end_date is not None
-        assert h.organizer == "TechOrg"
         assert h.image_url == "https://example.com/img.jpg"
-        assert h.registration_status == RegistrationStatus.OPEN
+        assert h.description == "A weekend hackathon"
 
-    def test_virtual_location(self):
-        event = {
-            "@type": "Event",
-            "name": "Online Hack",
-            "url": "https://x.com",
-            "location": {"@type": "VirtualLocation"},
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]), is_online=False)
-        assert len(results) == 1
+    def test_online_event_flag(self):
+        html = _wrap_server_data([_make_event(is_online_event=True)])
+        results = _extract_events(html, is_online=False)
         assert results[0].format == Format.VIRTUAL
         assert results[0].location == "Online"
 
-    def test_is_online_flag_forces_virtual(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "location": {
-                "@type": "Place",
-                "address": {"addressLocality": "NYC", "addressRegion": "NY"},
-            },
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]), is_online=True)
+    def test_is_online_param_forces_virtual(self):
+        html = _wrap_server_data([_make_event()])
+        results = _extract_events(html, is_online=True)
         assert results[0].format == Format.VIRTUAL
-
-    def test_skips_non_event_types(self):
-        items = [
-            {"@type": "Organization", "name": "Org"},
-            {"@type": "Event", "name": "Hack", "url": "https://x.com"},
-        ]
-        results = _extract_events_from_html(_wrap_json_ld(items))
-        assert len(results) == 1
-        assert results[0].name == "Hack"
 
     def test_skips_event_without_name(self):
-        event = {"@type": "Event", "url": "https://x.com"}
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert len(results) == 0
+        html = _wrap_server_data([_make_event(name="")])
+        assert len(_extract_events(html)) == 0
 
-    def test_invalid_start_date(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "startDate": "not-a-date",
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert len(results) == 1
-        assert results[0].start_date is None
+    def test_skips_event_without_url(self):
+        html = _wrap_server_data([_make_event(url="")])
+        assert len(_extract_events(html)) == 0
 
-    def test_image_as_list(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "image": ["https://img1.com", "https://img2.com"],
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert results[0].image_url == "https://img1.com"
-
-    def test_image_as_string(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "image": "https://single.com/img.jpg",
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert results[0].image_url == "https://single.com/img.jpg"
-
-    def test_organizer_not_dict(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "organizer": "A string organizer",
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert results[0].organizer == ""
-
-    def test_single_json_ld_object_not_list(self):
-        event = {"@type": "Event", "name": "Solo", "url": "https://x.com"}
-        html = f'<script type="application/ld+json">{json.dumps(event)}</script>'
-        results = _extract_events_from_html(html)
-        assert len(results) == 1
-
-    def test_invalid_json_ld_skipped(self):
-        html = '<script type="application/ld+json">{broken json</script>'
-        results = _extract_events_from_html(html)
-        assert len(results) == 0
-
-    def test_location_missing_address_fields(self):
-        event = {
-            "@type": "Event",
-            "name": "Hack",
-            "url": "https://x.com",
-            "location": {"@type": "Place", "name": "Cool Venue", "address": {}},
-        }
-        results = _extract_events_from_html(_wrap_json_ld([event]))
-        assert results[0].location == "Cool Venue"
-
-
-class TestExtractEventsFallbackCards:
-    def test_fallback_card_extraction(self):
-        html = """
-        <div>
-            <a href="https://www.eventbrite.com/e/ai-hack-123">
-                <h2>AI Hackathon</h2>
-            </a>
-            <a href="https://www.eventbrite.com/e/web-hack-456">
-                <h2>Web <b>Hackathon</b></h2>
-            </a>
-        </div>
-        """
-        results = _extract_events_from_html(html, is_online=False)
-        assert len(results) == 2
-        assert results[0].name == "AI Hackathon"
-        assert results[0].format == Format.IN_PERSON
-        assert results[0].location == "San Francisco, CA"
-        # HTML tags stripped from name
-        assert results[1].name == "Web Hackathon"
-
-    def test_fallback_online(self):
-        html = """
-        <a href="https://www.eventbrite.com/e/hack-123">
-            <h2>Virtual Hack</h2>
-        </a>
-        """
-        results = _extract_events_from_html(html, is_online=True)
-        assert len(results) == 1
-        assert results[0].format == Format.VIRTUAL
+    def test_no_venue_defaults_online(self):
+        html = _wrap_server_data([_make_event(primary_venue=None)])
+        results = _extract_events(html, is_online=False)
         assert results[0].location == "Online"
 
-    def test_fallback_empty_name_skipped(self):
-        html = """
-        <a href="https://www.eventbrite.com/e/hack-123">
-            <h2>   </h2>
-        </a>
-        """
-        results = _extract_events_from_html(html)
-        assert len(results) == 0
+    def test_venue_name_fallback(self):
+        venue = {"name": "Cool Space", "address": {}}
+        html = _wrap_server_data([_make_event(primary_venue=venue)])
+        results = _extract_events(html)
+        assert results[0].location == "Cool Space"
 
-    def test_no_events_at_all(self):
-        results = _extract_events_from_html("<html><body>Nothing here</body></html>")
-        assert len(results) == 0
+    def test_image_none(self):
+        html = _wrap_server_data([_make_event(image=None)])
+        results = _extract_events(html)
+        assert results[0].image_url == ""
+
+    def test_multiple_events(self):
+        events = [
+            _make_event(name="Hack 1", url="https://www.eventbrite.com/e/1"),
+            _make_event(name="Hack 2", url="https://www.eventbrite.com/e/2"),
+            _make_event(name="Hack 3", url="https://www.eventbrite.com/e/3"),
+        ]
+        html = _wrap_server_data(events)
+        assert len(_extract_events(html)) == 3
+
+    def test_missing_dates(self):
+        html = _wrap_server_data([_make_event(start_date=None, end_date=None)])
+        results = _extract_events(html)
+        assert results[0].start_date is None
+        assert results[0].end_date is None
+
+    def test_empty_html(self):
+        assert len(_extract_events("<html></html>")) == 0
