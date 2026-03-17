@@ -1,94 +1,72 @@
 # Bob
 
-Bob is the vibe coder you send to the hackathon in your place.
+Bob goes to hackathons and wins them.
 
-This repo is the **hackathon discovery** component — an agentic pipeline that scrapes six platforms, deduplicates across them, and investigates each event with a per-event AI agent to verify legitimacy and correct bad metadata.
+He finds events across six platforms, registers, reads every page of the brief, figures out what to build, builds it, and submits. You check back and there's a trophy.
 
-## What it does
+This repo is the first piece — **hackathon discovery**. Bob scrapes Devpost, MLH, Devfolio, Luma, Eventbrite, and Meetup, deduplicates across all of them, then sends an investigation agent to every event to verify it's real. Organizers list in-person hackathons as "Online" all the time. Bob catches that. Every correction carries provenance: the source URL and the extracted text that proves it.
 
-```
-6 sources (Devpost, MLH, Devfolio, Luma, Eventbrite, Meetup)
-    ↓
-Concurrent async fetch + cross-platform deduplication (fuzzy + exact)
-    ↓
-Structural triage (keyword scoring, duration signals, curated-source confidence)
-    ↓
-Per-event investigation agent (multi-turn tool use via Anthropic SDK)
-    Each event gets its own agent loop:
-    ├─ fetch_page(url) → metadata + readable text
-    ├─ check_link(url) → HEAD status + redirects
-    └─ submit_verdict → valid/invalid + grounded corrections with evidence
-    ↓
-Validated, corrected hackathon list
-```
+Bob is a [Vibe Coding Nights](https://vibecodingnights.com) project.
 
-The investigation agent catches things like organizers listing in-person hackathons as "Online" in their API metadata while the actual page says "Hickman Building, Room 105, University of Victoria." Every correction carries provenance: source URL and extracted text.
+## How it works
+
+Six sources, fetched concurrently. Cross-platform dedup (fuzzy + exact). Structural triage via keyword scoring, duration signals, and curated-source confidence. Then every event gets its own investigation agent — a multi-turn tool-use loop via the Anthropic SDK that fetches pages, checks links, and submits a grounded verdict.
+
+The output is a validated hackathon list where the metadata actually matches reality.
 
 ## Install
 
-```bash
+```
 pip install -e ".[dev]"
 ```
 
-For sources that require browser scraping (MLH):
-```bash
+For sources that need browser scraping (MLH):
+
+```
 pip install -e ".[scrape]"
 ```
 
 ## Usage
 
-```bash
-# Default: SF in-person + virtual, with agent validation
-hackathon-finder
-
-# JSON output
-hackathon-finder --json
-
-# Filter by source
-hackathon-finder --source devpost,luma
-
-# Date range
+```
+hackathon-finder                                  # SF in-person + virtual, validated
+hackathon-finder --json                           # JSON output
+hackathon-finder --source devpost,luma            # Filter by source
 hackathon-finder --after 2026-03-01 --before 2026-04-01
-
-# Skip validation (no API calls)
-hackathon-finder --no-validate
-
-# Use a stronger model for investigation
-hackathon-finder --model claude-sonnet-4-5-20250929
+hackathon-finder --no-validate                    # Skip validation (no API calls)
+hackathon-finder --model claude-sonnet-4-5-20250929  # Stronger investigation model
 ```
 
 ## Auth
 
-The validation agent needs Anthropic API access. Either:
+The investigation agent needs Anthropic API access:
 
-- Set `ANTHROPIC_API_KEY` env var, or
-- Log in with your Claude account (OAuth flow opens browser automatically)
-
-OAuth tokens are cached at `~/.hackathon-finder/oauth.json`.
+- Set `ANTHROPIC_API_KEY`, or
+- Let the OAuth flow open your browser (tokens cached at `~/.hackathon-finder/oauth.json`)
 
 ## Tests
 
-```bash
+```
 pytest
 ```
 
-186 tests. All validation/agent tests use mocks — no API calls.
+186 tests. All agent tests use mocks — no API calls.
 
 ## Architecture
 
 ```
 src/hackathon_finder/
 ├── sources/          # 6 platform adapters (async, independent)
-│   ├── devpost.py    #   Devpost HTTP API
-│   ├── mlh.py        #   MLH (Inertia.js scrape)
-│   ├── devfolio.py   #   Devfolio HTTP API
-│   ├── luma.py       #   Luma HTTP API
-│   ├── eventbrite.py #   Eventbrite HTTP API
-│   └── meetup.py     #   Meetup GraphQL API
+│   ├── devpost.py
+│   ├── mlh.py
+│   ├── devfolio.py
+│   ├── luma.py
+│   ├── eventbrite.py
+│   └── meetup.py
 ├── aggregator.py     # Concurrent fetch, 2-pass dedup (exact + fuzzy Jaccard)
 ├── validate.py       # Triage → investigate → apply corrections
 ├── agent.py          # Per-event investigation agent (Anthropic SDK tool use)
-├── oauth.py          # PKCE OAuth for Claude Pro/Max (free API access)
+├── oauth.py          # PKCE OAuth for Claude Pro/Max
 ├── models.py         # Hackathon, Format, RegistrationStatus
 └── cli.py            # Rich terminal UI
 ```
