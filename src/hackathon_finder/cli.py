@@ -229,7 +229,7 @@ async def _run_analyze(args: argparse.Namespace) -> None:
             "confidence": result.confidence,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
-            "tool_calls": result.tool_calls,
+            "total_turns": result.total_turns,
         }, indent=2))
     else:
         print(f"\n{'='*60}")
@@ -241,7 +241,7 @@ async def _run_analyze(args: argparse.Namespace) -> None:
         print(f"Sections written: {len(result.sections_written)}")
         print(f"Confidence: {result.confidence:.0%}")
         print(f"Tokens: {result.input_tokens:,} input + {result.output_tokens:,} output")
-        print(f"Tool calls: {result.tool_calls}")
+        print(f"Total turns: {result.total_turns}")
         print(f"\nSummary:\n{result.summary}")
         print(f"\nSections:")
         for s in result.sections_written:

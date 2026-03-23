@@ -305,7 +305,7 @@ class SituationResult:
     confidence: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
-    tool_calls: int = 0
+    total_turns: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -423,12 +423,12 @@ async def _run_phase(
                 )
                 if message.usage:
                     u = message.usage
-                    result.input_tokens = (
+                    result.input_tokens += (
                         u.get("input_tokens", 0)
                         + u.get("cache_creation_input_tokens", 0)
                         + u.get("cache_read_input_tokens", 0)
                     )
-                    result.output_tokens = u.get("output_tokens", 0)
+                    result.output_tokens += u.get("output_tokens", 0)
                 result.turns = message.num_turns
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
@@ -710,6 +710,9 @@ async def analyze(
                     all_phases.append(r)
                 elif isinstance(r, BaseException):
                     logger.warning("Research task failed: %s", r)
+                    all_phases.append(PhaseResult(
+                        phase="research", error=str(r),
+                    ))
 
         # Phase 6: Strategy synthesis
         logger.info("Phase 6/6: Strategy synthesis")
@@ -740,7 +743,7 @@ async def analyze(
             result.sections_written.extend(p.sections_written)
             result.input_tokens += p.input_tokens
             result.output_tokens += p.output_tokens
-            result.tool_calls += p.turns
+            result.total_turns += p.turns
 
         # Fallback: scan disk if capture missed sections
         if not result.sections_written and os.path.isdir(map_root):
