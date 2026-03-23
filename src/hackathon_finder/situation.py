@@ -15,7 +15,13 @@ from pathlib import Path
 
 import httpx
 import yaml
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    ToolUseBlock,
+    query,
+)
 
 from hackathon_finder.models import Format, Hackathon
 from hackathon_finder.tools.mcp import (
@@ -28,6 +34,10 @@ from hackathon_finder.tools.mcp import (
 )
 
 logger = logging.getLogger(__name__)
+
+# SDK closes stdin after CLAUDE_CODE_STREAM_CLOSE_TIMEOUT (ms), killing MCP
+# tool calls.  Phases run 2-5 min; 10 min is safe.
+os.environ.setdefault("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "600000")
 
 # ---------------------------------------------------------------------------
 # Phase-specific system prompts
@@ -78,6 +88,7 @@ judges:
 
 If you can't find tracks, sponsors, or judges, use empty arrays.
 Use owner "situation-room" for write_section.
+IMPORTANT: Use path "overview.md" exactly — no subdirectories, no event name prefix.
 Be thorough on the event page — follow links to tracks, rules, and about pages."""
 
 TRACK_PROMPT = """\
@@ -388,6 +399,11 @@ async def _run_phase(
         model=model,
         mcp_servers={"tools": server},
         allowed_tools=_PHASE_TOOLS.get(phase_name, []),
+        disallowed_tools=[
+            "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+            "WebFetch", "WebSearch", "ToolSearch", "Agent",
+            "NotebookEdit",
+        ],
         permission_mode="bypassPermissions",
         max_turns=max_turns,
     )
@@ -396,7 +412,15 @@ async def _run_phase(
 
     try:
         async for message in query(prompt=user_message, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        logger.debug("[%s] tool_use: %s", phase_name, block.name)
             if isinstance(message, ResultMessage):
+                logger.debug(
+                    "[%s] result: turns=%d error=%s",
+                    phase_name, message.num_turns, message.is_error,
+                )
                 if message.usage:
                     u = message.usage
                     result.input_tokens = (
@@ -425,7 +449,12 @@ def _parse_overview(map_root: str) -> OverviewData:
     """Parse overview.md YAML frontmatter to extract tracks, sponsors, judges."""
     overview_path = os.path.join(map_root, "overview.md")
     if not os.path.exists(overview_path):
-        return OverviewData()
+        # Fallback: search recursively for overview.md
+        for p in Path(map_root).rglob("overview.md"):
+            overview_path = str(p)
+            break
+        else:
+            return OverviewData()
 
     text = Path(overview_path).read_text()
 

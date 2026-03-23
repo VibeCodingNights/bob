@@ -214,7 +214,12 @@ def _make_map_tools(
     """Create semantic-map tools bound to a map root directory."""
 
     async def write_section(args: dict) -> dict:
-        result = execute_map_tool("write_section", args, map_root)
+        try:
+            result = execute_map_tool("write_section", args, map_root)
+        except (KeyError, TypeError) as e:
+            return _resp(f"Error: missing required argument: {e}")
+        except Exception as e:
+            return _resp(f"Error: {e}")
         if capture is not None and result.startswith("Written:"):
             path = args.get("path", "")
             if path and path not in capture.sections_written:
