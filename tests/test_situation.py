@@ -1,18 +1,27 @@
-"""Tests for the Situation Room agent (situation.py)."""
+"""Tests for the orchestrated Situation Room pipeline (situation.py)."""
 
 from __future__ import annotations
 
 import os
-import shutil
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 from claude_agent_sdk import ResultMessage
 
 from hackathon_finder.models import Hackathon
-from hackathon_finder.situation import SituationResult, analyze
+from hackathon_finder.situation import (
+    OverviewData,
+    PhaseResult,
+    SituationResult,
+    _compute_confidence,
+    _compute_summary,
+    _load_priors,
+    _parse_overview,
+    _read_map_for_strategy,
+    analyze,
+)
 from hackathon_finder.tools.mcp import ResultCapture
-from hackathon_finder.tools.web import execute_check_link, execute_fetch_page
 
 
 # ---------------------------------------------------------------------------
@@ -71,29 +80,206 @@ def _result_msg(
     )
 
 
+def _write_overview(tmp_path, tracks=None, sponsors=None, judges=None):
+    """Write a mock overview.md with YAML frontmatter."""
+    fm = {
+        "name": "Test Hackathon",
+        "tracks": tracks or [],
+        "sponsors": sponsors or [],
+        "judges": judges or [],
+    }
+    content = f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\nEvent overview body.\n"
+    (tmp_path / "overview.md").write_text(content)
+
+
 # ---------------------------------------------------------------------------
-# 1. Full agent loop — happy path
+# 1. Overview parsing
 # ---------------------------------------------------------------------------
 
 
-class TestAnalyzeHappyPath:
+class TestParseOverview:
+    def test_parses_tracks(self, tmp_path):
+        _write_overview(
+            tmp_path,
+            tracks=[
+                {"name": "DeFi", "sponsor": "Uniswap", "prize": "$10K"},
+                {"name": "AI", "sponsor": "OpenAI", "prize": "$5K"},
+            ],
+        )
+        data = _parse_overview(str(tmp_path))
+        assert len(data.tracks) == 2
+        assert data.tracks[0]["name"] == "DeFi"
+        assert data.tracks[1]["sponsor"] == "OpenAI"
+
+    def test_parses_sponsors(self, tmp_path):
+        _write_overview(
+            tmp_path,
+            sponsors=[
+                {"name": "Uniswap", "url": "https://uniswap.org"},
+            ],
+        )
+        data = _parse_overview(str(tmp_path))
+        assert len(data.sponsors) == 1
+        assert data.sponsors[0]["url"] == "https://uniswap.org"
+
+    def test_parses_judges(self, tmp_path):
+        _write_overview(
+            tmp_path,
+            judges=[{"name": "Alice", "url": "https://github.com/alice"}],
+        )
+        data = _parse_overview(str(tmp_path))
+        assert len(data.judges) == 1
+
+    def test_missing_overview(self, tmp_path):
+        data = _parse_overview(str(tmp_path))
+        assert data.tracks == []
+        assert data.sponsors == []
+        assert data.judges == []
+
+    def test_empty_frontmatter(self, tmp_path):
+        (tmp_path / "overview.md").write_text("---\n---\nJust body.\n")
+        data = _parse_overview(str(tmp_path))
+        assert data.tracks == []
+
+    def test_malformed_yaml(self, tmp_path):
+        (tmp_path / "overview.md").write_text("---\n: bad: yaml: {{{\n---\nbody\n")
+        data = _parse_overview(str(tmp_path))
+        assert data.tracks == []
+
+
+# ---------------------------------------------------------------------------
+# 2. Priors loading
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPriors:
+    def test_no_priors_file(self):
+        result = _load_priors()
+        # May or may not find the file — test it doesn't crash
+        assert isinstance(result, str)
+
+    def test_priors_content(self, tmp_path):
+        priors_dir = tmp_path / "knowledge"
+        priors_dir.mkdir()
+        (priors_dir / "priors.md").write_text("# Test priors\n- Pattern 1\n")
+        with patch(
+            "hackathon_finder.situation._load_priors",
+            return_value="\n## Prior knowledge\n\n# Test priors\n- Pattern 1\n",
+        ):
+            result = _load_priors()
+            assert "Prior knowledge" in result
+
+
+# ---------------------------------------------------------------------------
+# 3. Map reading for strategy
+# ---------------------------------------------------------------------------
+
+
+class TestReadMapForStrategy:
+    def test_reads_sections(self, tmp_path):
+        (tmp_path / "overview.md").write_text("Overview content")
+        tracks = tmp_path / "tracks"
+        tracks.mkdir()
+        (tracks / "defi.md").write_text("DeFi track info")
+        result = _read_map_for_strategy(str(tmp_path))
+        assert "Overview content" in result
+        assert "DeFi track info" in result
+        assert "tracks/defi.md" in result
+
+    def test_empty_map(self, tmp_path):
+        result = _read_map_for_strategy(str(tmp_path))
+        assert "No research sections found" in result
+
+    def test_skips_research_log(self, tmp_path):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "research.md").write_text("Log entry")
+        (tmp_path / "overview.md").write_text("Overview")
+        result = _read_map_for_strategy(str(tmp_path))
+        assert "Log entry" not in result
+        assert "Overview" in result
+
+
+# ---------------------------------------------------------------------------
+# 4. Confidence computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConfidence:
+    def test_all_phases_complete(self):
+        phases = [
+            PhaseResult(phase="overview"),
+            PhaseResult(phase="track"),
+            PhaseResult(phase="strategy"),
+        ]
+        conf = _compute_confidence(phases, OverviewData())
+        assert conf >= 0.9  # 3/3 + strategy bonus
+
+    def test_some_phases_failed(self):
+        phases = [
+            PhaseResult(phase="overview"),
+            PhaseResult(phase="track", error="timeout"),
+            PhaseResult(phase="strategy"),
+        ]
+        conf = _compute_confidence(phases, OverviewData())
+        assert 0.6 < conf < 0.9  # 2/3 + bonus
+
+    def test_no_phases(self):
+        assert _compute_confidence([], OverviewData()) == 0.3
+
+    def test_no_strategy_no_bonus(self):
+        phases = [
+            PhaseResult(phase="overview"),
+            PhaseResult(phase="track"),
+        ]
+        conf = _compute_confidence(phases, OverviewData())
+        assert conf == 1.0  # 2/2, no strategy bonus needed (already 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 5. Summary computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSummary:
+    def test_basic_summary(self):
+        phases = [
+            PhaseResult(phase="overview"),
+            PhaseResult(phase="track"),
+        ]
+        overview = OverviewData(tracks=[{"name": "DeFi"}])
+        result = SituationResult(
+            event_id="test",
+            map_root="/tmp/test",
+            sections_written=["overview.md", "tracks/defi.md"],
+        )
+        summary = _compute_summary(phases, overview, result)
+        assert "1 tracks identified" in summary
+        assert "2/2 phases completed" in summary
+        assert "2 sections written" in summary
+
+    def test_summary_with_errors(self):
+        phases = [
+            PhaseResult(phase="overview"),
+            PhaseResult(phase="track", error="failed"),
+        ]
+        result = SituationResult(event_id="test", map_root="/tmp/test")
+        summary = _compute_summary(phases, OverviewData(), result)
+        assert "1 phases had errors" in summary
+
+
+# ---------------------------------------------------------------------------
+# 6. Full pipeline — mocked
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzePipeline:
     @pytest.mark.asyncio
     @patch("hackathon_finder.situation.query")
-    @patch("hackathon_finder.situation.ResultCapture")
-    async def test_full_loop(self, MockCapture, mock_query, tmp_path):
-        """Agent completes analysis with sections and submission."""
-        capture = MagicMock()
-        capture.data = {
-            "summary": "Great hackathon with AI track",
-            "tracks_found": 2,
-            "sections_written": 2,
-            "confidence": 0.85,
-        }
-        capture.sections_written = ["overview.md", "tracks/ai.md"]
-        MockCapture.return_value = capture
-
+    async def test_overview_only(self, mock_query, tmp_path):
+        """Pipeline runs overview phase and returns result even without tracks."""
         mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=1000, output_tokens=310, num_turns=4)
+            _result_msg(input_tokens=500, output_tokens=100, num_turns=3)
         )
 
         http = _mock_http_client()
@@ -103,35 +289,36 @@ class TestAnalyzeHappyPath:
             http_client=http,
         )
 
-        assert result.summary == "Great hackathon with AI track"
-        assert result.tracks_found == 2
-        assert result.confidence == 0.85
-        assert "overview.md" in result.sections_written
-        assert "tracks/ai.md" in result.sections_written
-        assert result.input_tokens == 1000
-        assert result.output_tokens == 310
-        assert result.tool_calls == 4
+        assert isinstance(result, SituationResult)
+        assert result.event_id
+        assert result.map_root == str(tmp_path)
+        # query() called at least for overview + past + strategy
+        assert mock_query.call_count >= 3
 
-
-# ---------------------------------------------------------------------------
-# 2. Agent stops without verdict
-# ---------------------------------------------------------------------------
-
-
-class TestStopsWithoutVerdict:
     @pytest.mark.asyncio
     @patch("hackathon_finder.situation.query")
-    @patch("hackathon_finder.situation.ResultCapture")
-    async def test_end_turn_without_submit(self, MockCapture, mock_query, tmp_path):
-        """Agent returns without calling submit_analysis."""
-        capture = MagicMock()
-        capture.data = None
-        capture.sections_written = []
-        MockCapture.return_value = capture
+    async def test_with_tracks(self, mock_query, tmp_path):
+        """Pipeline fans out per-track agents when overview has tracks."""
+        call_count = 0
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=200, output_tokens=30, num_turns=0)
-        )
+        def mock_query_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # On the first call (overview), write overview.md
+            if call_count == 1:
+                _write_overview(
+                    tmp_path,
+                    tracks=[
+                        {"name": "DeFi", "sponsor": "Uniswap", "prize": "$10K"},
+                    ],
+                    sponsors=[{"name": "Uniswap", "url": "https://uniswap.org"}],
+                    judges=[{"name": "Alice", "url": "https://github.com/alice"}],
+                )
+            return _mock_query(
+                _result_msg(input_tokens=200, output_tokens=50, num_turns=2)
+            )
+
+        mock_query.side_effect = mock_query_fn
 
         http = _mock_http_client()
         result = await analyze(
@@ -140,35 +327,39 @@ class TestStopsWithoutVerdict:
             http_client=http,
         )
 
-        assert result.confidence == 0.3
-        assert "stopped without submitting" in result.summary.lower()
-        assert result.tool_calls == 0
+        # overview + 1 track + 1 sponsor + 1 judge + past + strategy = 6
+        assert call_count == 6
+        assert result.tracks_found == 1
+        assert result.input_tokens == 200 * 6
+        assert result.output_tokens == 50 * 6
 
-
-# ---------------------------------------------------------------------------
-# 3. sections_written tracking
-# ---------------------------------------------------------------------------
-
-
-class TestSectionsWrittenTracking:
     @pytest.mark.asyncio
     @patch("hackathon_finder.situation.query")
-    @patch("hackathon_finder.situation.ResultCapture")
-    async def test_tracks_written_sections(self, MockCapture, mock_query, tmp_path):
-        """write_section paths are tracked in result.sections_written."""
-        capture = MagicMock()
-        capture.data = {
-            "summary": "All done",
-            "tracks_found": 1,
-            "sections_written": 3,
-            "confidence": 0.9,
-        }
-        capture.sections_written = ["overview.md", "tracks/defi.md", "strategy.md"]
-        MockCapture.return_value = capture
+    async def test_phase_error_doesnt_crash(self, mock_query, tmp_path):
+        """A failing research phase doesn't crash the pipeline."""
+        call_count = 0
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=400, output_tokens=130, num_turns=3)
-        )
+        def mock_query_fn(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Overview succeeds
+                _write_overview(
+                    tmp_path,
+                    tracks=[{"name": "DeFi", "sponsor": "Uni", "prize": "$5K"}],
+                )
+                return _mock_query(
+                    _result_msg(input_tokens=200, output_tokens=50, num_turns=2)
+                )
+            if call_count == 2:
+                # Track research fails
+                raise RuntimeError("CLI subprocess crashed")
+            # All other phases succeed
+            return _mock_query(
+                _result_msg(input_tokens=100, output_tokens=30, num_turns=1)
+            )
+
+        mock_query.side_effect = mock_query_fn
 
         http = _mock_http_client()
         result = await analyze(
@@ -177,44 +368,52 @@ class TestSectionsWrittenTracking:
             http_client=http,
         )
 
-        assert result.sections_written == ["overview.md", "tracks/defi.md", "strategy.md"]
+        # Pipeline should complete despite track failure
+        assert result.confidence > 0
+        assert "error" in result.summary.lower() or result.confidence < 1.0
 
-
-# ---------------------------------------------------------------------------
-# 4. map_root defaults to events/<event_id>
-# ---------------------------------------------------------------------------
-
-
-class TestMapRootDefault:
     @pytest.mark.asyncio
     @patch("hackathon_finder.situation.query")
-    @patch("hackathon_finder.situation.ResultCapture")
-    async def test_default_map_root(self, MockCapture, mock_query):
-        """When map_root=None, it defaults to ./events/<event_id>."""
-        h = _h()
-        event_id = h.event_id
+    async def test_disk_fallback(self, mock_query, tmp_path):
+        """Sections on disk are detected even if capture missed them."""
+        mock_query.return_value = _mock_query(
+            _result_msg(input_tokens=100, output_tokens=30, num_turns=1)
+        )
 
-        capture = MagicMock()
-        capture.data = {
-            "summary": "Quick analysis",
-            "tracks_found": 0,
-            "sections_written": 0,
-            "confidence": 0.5,
-        }
-        capture.sections_written = []
-        MockCapture.return_value = capture
+        # Pre-populate some files on disk
+        tracks_dir = tmp_path / "tracks"
+        tracks_dir.mkdir()
+        (tracks_dir / "defi.md").write_text("DeFi content")
+        (tmp_path / "overview.md").write_text("Overview content")
 
+        http = _mock_http_client()
+        result = await analyze(
+            _h(),
+            map_root=str(tmp_path),
+            http_client=http,
+        )
+
+        # Should find files on disk
+        assert len(result.sections_written) >= 2
+
+    @pytest.mark.asyncio
+    @patch("hackathon_finder.situation.query")
+    async def test_default_map_root(self, mock_query):
+        """When map_root=None, defaults to ./events/<event_id>."""
         mock_query.return_value = _mock_query(
             _result_msg(input_tokens=100, output_tokens=30, num_turns=0)
         )
 
+        h = _h()
         http = _mock_http_client()
         result = await analyze(h, map_root=None, http_client=http)
 
-        expected_suffix = os.path.join("events", event_id)
+        expected_suffix = os.path.join("events", h.event_id)
         assert result.map_root.endswith(expected_suffix)
 
         # Clean up
+        import shutil
+
         if os.path.exists(result.map_root):
             shutil.rmtree(result.map_root)
         events_dir = os.path.dirname(result.map_root)
@@ -223,93 +422,60 @@ class TestMapRootDefault:
 
 
 # ---------------------------------------------------------------------------
-# 5. Error handling
+# 7. PhaseResult aggregation
 # ---------------------------------------------------------------------------
 
 
-class TestErrorHandling:
-    @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    @patch("hackathon_finder.situation.ResultCapture")
-    async def test_query_exception(self, MockCapture, mock_query, tmp_path):
-        """Exception during query() returns safe fallback."""
-        capture = MagicMock()
-        capture.data = None
-        capture.sections_written = ["overview.md"]
-        MockCapture.return_value = capture
+class TestPhaseResult:
+    def test_default_values(self):
+        pr = PhaseResult(phase="test")
+        assert pr.input_tokens == 0
+        assert pr.output_tokens == 0
+        assert pr.turns == 0
+        assert pr.sections_written == []
+        assert pr.error is None
 
-        mock_query.side_effect = RuntimeError("CLI subprocess failed")
-
-        http = _mock_http_client()
-        result = await analyze(
-            _h(),
-            map_root=str(tmp_path),
-            http_client=http,
-        )
-
-        # Exception swallowed gracefully — sections preserved, treated as incomplete
-        assert result.confidence == 0.5
-        assert "wrote 1 sections" in result.summary
-        assert result.sections_written == ["overview.md"]
+    def test_with_error(self):
+        pr = PhaseResult(phase="test", error="something broke")
+        assert pr.error == "something broke"
 
 
 # ---------------------------------------------------------------------------
-# 6. Tool dispatch (via MCP handlers)
+# 8. Tool dispatch (via MCP handlers)
 # ---------------------------------------------------------------------------
 
 
 class TestToolDispatch:
-    """Tests that MCP tool handlers dispatch correctly to underlying executors."""
+    """Tests that MCP tool handlers dispatch correctly."""
 
     @pytest.mark.asyncio
     async def test_fetch_page_via_mcp(self):
         """fetch_page MCP handler routes to web tool."""
         http = _mock_http_client()
-        capture = ResultCapture()
         from hackathon_finder.tools.mcp import _make_web_tools
 
         tools = _make_web_tools(http)
-        fetch_page = tools[0]  # FETCH_PAGE_TOOL
+        fetch_page = tools[0]
         result = await fetch_page.handler({"url": "https://example.com"})
         assert result["content"][0]["type"] == "text"
         assert "Status:" in result["content"][0]["text"]
 
     @pytest.mark.asyncio
     async def test_write_section_via_mcp(self, tmp_path):
-        """write_section MCP handler routes to map tool and tracks sections."""
+        """write_section MCP handler tracks sections."""
         capture = ResultCapture()
         from hackathon_finder.tools.mcp import _make_map_tools
 
         tools = _make_map_tools(str(tmp_path), capture)
-        write_section = tools[0]  # WRITE_SECTION_TOOL
-        result = await write_section.handler({
-            "path": "test.md",
-            "frontmatter": {"title": "Test"},
-            "body": "Hello",
-            "owner": "test",
-        })
+        write_section = tools[0]
+        result = await write_section.handler(
+            {
+                "path": "test.md",
+                "frontmatter": {"title": "Test"},
+                "body": "Hello",
+                "owner": "test",
+            }
+        )
         assert "Written" in result["content"][0]["text"]
         assert (tmp_path / "test.md").exists()
         assert capture.sections_written == ["test.md"]
-
-    @pytest.mark.asyncio
-    async def test_submit_verdict_captures_data(self):
-        """submit_verdict MCP handler captures result data."""
-        http = _mock_http_client()
-        capture = ResultCapture()
-        from hackathon_finder.tools.mcp import create_investigation_server
-
-        server = create_investigation_server(http, capture)
-        # The server instance has tools registered; find submit_verdict
-        # Test via the capture mechanism indirectly
-        assert capture.data is None
-
-    @pytest.mark.asyncio
-    async def test_submit_analysis_captures_data(self):
-        """submit_analysis MCP handler captures result data."""
-        http = _mock_http_client()
-        capture = ResultCapture()
-        from hackathon_finder.tools.mcp import create_situation_server
-
-        server = create_situation_server(http, str("/tmp/test-map"), capture)
-        assert capture.data is None

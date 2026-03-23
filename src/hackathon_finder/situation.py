@@ -1,87 +1,285 @@
-"""Situation Room agent — deep hackathon analysis and semantic map generation.
+"""Situation Room — orchestrated multi-phase hackathon analysis.
 
-Analyzes a hackathon event, researches its ecosystem (tracks, sponsors,
-judges, past winners), and produces a living semantic map that downstream
-agents consume.
+Decomposes deep hackathon research into focused agent phases:
+overview → tracks → sponsors → judges → past → strategy synthesis.
+Each phase gets its own agent, budget, and tool set.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
+import yaml
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
 from hackathon_finder.models import Format, Hackathon
-from hackathon_finder.tools.mcp import ResultCapture, create_situation_server
+from hackathon_finder.tools.mcp import (
+    ResultCapture,
+    _make_github_tools,
+    _make_map_tools,
+    _make_platform_tools,
+    _make_web_tools,
+    create_sdk_mcp_server,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# System prompt
+# Phase-specific system prompts
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are the Situation Room — a strategic intelligence agent that deeply analyzes \
-hackathon events. Your job is to research the hackathon and produce a comprehensive \
-semantic map that downstream agents will use to plan, build, and win.
+OVERVIEW_PROMPT = """\
+You are a hackathon analyst. Fetch the event page and extract structured information.
 
-## Your workflow — complete ALL phases
+## Your task
 
-1. **Fetch the event page first.** Identify the hackathon name, dates, tracks/categories, \
-themes, sponsors, judges, prizes, and submission requirements.
+1. Fetch the event URL provided.
+2. Identify: event name, dates, format (virtual/in-person/hybrid), location, \
+registration status, prize pool, tracks/categories, sponsors, and judges.
+3. Call write_section to create overview.md with:
+   - YAML frontmatter containing structured data (see format below)
+   - Body with a clear event summary
 
-2. **Write overview.md** with event basics using write_section (owner: "situation-room"). \
-Include name, dates, format, location, registration status, prize pool, and a summary.
+## Required frontmatter format
 
-3. **Research each track/category.** What does the sponsor want? What do judges value? \
-What are the prizes? Write tracks/<track-name>.md for each track you identify. \
-Fetch sponsor developer docs, API references, and GitHub repos for each track's sponsor. \
-Every track file should include: prize amount, sponsor integration requirements, \
-relevant APIs/SDKs, and what a winning project looks like.
+The frontmatter MUST include these arrays so downstream agents know what to research:
 
-4. **Research every sponsor.** Fetch their websites, GitHub profiles, recent blog posts, \
-developer docs. Understand what product/API they are currently pushing. \
-Write sponsors/<name>.md for each sponsor. Include their developer platform URL, \
-key APIs/SDKs, what they want builders to use, and judge alignment.
+```yaml
+name: "Event Name"
+dates: "June 1-3, 2026"
+format: "in-person"
+location: "Prague, Czech Republic"
+prize_pool: "$500,000"
+tracks:
+  - name: "Track Name"
+    sponsor: "Sponsor Name"
+    prize: "$10,000"
+    description: "Brief description"
+  - name: "Another Track"
+    sponsor: "Another Sponsor"
+    prize: "$5,000"
+    description: "Brief description"
+sponsors:
+  - name: "Sponsor Name"
+    url: "https://sponsor.com"
+  - name: "Another Sponsor"
+    url: "https://another.com"
+judges:
+  - name: "Judge Name"
+    url: "https://github.com/judge"
+  - name: "Another Judge"
+    url: "https://twitter.com/judge"
+```
 
-5. **Research judges.** Fetch their GitHub profiles, published work, recent talks. \
-Understand their background, what they evaluate, and what impresses them. \
-Write judges/<name>.md for each judge you can find info on.
+If you can't find tracks, sponsors, or judges, use empty arrays.
+Use owner "situation-room" for write_section.
+Be thorough on the event page — follow links to tracks, rules, and about pages."""
 
-6. **Search for past editions and past winners.** Use search_web and fetch_devpost_winners \
-to find what won previously. Write past/<edition>.md for each edition you find. \
-Include winning project names, tech stacks, prize amounts, and what made them win.
+TRACK_PROMPT = """\
+You are a hackathon track researcher. Research a single hackathon track in depth.
 
-7. **Synthesize strategy.md** — your strategic analysis grounded in everything above:
-   - Which tracks to enter and why (ranked by expected value)
-   - What to build for each recommended track
-   - Technical approach and stack recommendations
-   - Key risks and how to mitigate them
-   - Sponsor alignment opportunities
-   - Judge panel composition insights
-   - Detailed execution timeline (hour-by-hour for the hackathon)
-   - Pitch preparation: key talking points, anticipated judge questions
+## Your task
 
-8. **Call submit_analysis** with a comprehensive summary when ALL phases are complete.
+1. Fetch the sponsor's website and developer docs.
+2. Search for the sponsor's GitHub repos and recent releases.
+3. Understand what API/SDK the sponsor wants builders to use.
+4. Write tracks/<track-name>.md with:
+   - Prize amount and requirements
+   - Sponsor's key APIs/SDKs and developer docs URL
+   - What a winning project looks like for this track
+   - Recent features the sponsor is pushing (check their blog/changelog)
 
-## Guidelines
+Use owner "situation-room" for write_section.
+Use kebab-case for the filename (e.g., tracks/defi-lending.md)."""
 
-- Always use owner "situation-room" when calling write_section or append_log.
-- **Be thorough.** Do not skip phases or cut corners. Complete every phase above \
-before calling submit_analysis. The quality of downstream agents depends entirely \
-on the depth of your research.
-- Fetch every sponsor's developer docs page. Fetch every judge's GitHub profile. \
-Search for every past edition. Write a dedicated file for each.
-- Use append_log to record notable findings as you go (path: "logs/research.md").
-- Every claim in strategy.md should be grounded in something you fetched.
-- Do NOT call submit_analysis until you have completed all 7 phases above."""
+SPONSOR_PROMPT = """\
+You are a hackathon sponsor researcher. Research a single sponsor in depth.
+
+## Your task
+
+1. Fetch the sponsor's website and developer platform.
+2. Fetch their GitHub profile and popular repos.
+3. Check recent blog posts or changelog for what they're currently pushing.
+4. Write sponsors/<name>.md with:
+   - Developer platform URL
+   - Key APIs/SDKs and what they do
+   - What the sponsor wants builders to use (recent pushes)
+   - Integration requirements for hackathon projects
+
+Use owner "situation-room" for write_section.
+Use kebab-case for the filename (e.g., sponsors/uniswap.md)."""
+
+JUDGE_PROMPT = """\
+You are a hackathon judge researcher. Research a single judge.
+
+## Your task
+
+1. Fetch the judge's profile URL (GitHub, Twitter/X, LinkedIn).
+2. Search for their recent talks, publications, or projects.
+3. Write judges/<name>.md with:
+   - Professional background and current role
+   - Technical interests and expertise
+   - What they likely evaluate (inferred from background)
+   - Anticipated questions they might ask
+
+Use owner "situation-room" for write_section.
+Use kebab-case for the filename (e.g., judges/vitalik-buterin.md)."""
+
+PAST_PROMPT = """\
+You are a hackathon historian. Research past editions and winners.
+
+## Your task
+
+1. Search the web for past editions of this hackathon.
+2. Use fetch_devpost_winners if the hackathon is on Devpost.
+3. For each past edition you find, write past/<edition>.md with:
+   - Winning project names and descriptions
+   - Tech stacks used by winners
+   - Prize amounts won
+   - Patterns: what made winners stand out
+
+If you can't find past editions, write past/no-history.md noting that.
+Use owner "situation-room" for write_section."""
+
+STRATEGY_PROMPT = """\
+You are a hackathon strategist. Synthesize all research into an actionable strategy.
+
+## Context
+
+You have access to a semantic map with research on this hackathon's tracks, \
+sponsors, judges, and past winners. Use list_sections and read_section to \
+review everything that's been written.
+
+{priors}
+
+## Your task
+
+1. Read ALL sections in the map using list_sections, then read_section for each.
+2. Write strategy.md with:
+
+### Track Rankings
+Rank every track by expected value. For each:
+- Track name and prize
+- Why this track is worth entering (or not)
+- What to build — a specific, concrete project idea
+- Which sponsor APIs/SDKs to integrate
+- Estimated difficulty and risk
+
+### Sponsor Alignment
+- Which sponsors are pushing new features (opportunity for attention)
+- Integration strategies that maximize sponsor impression
+
+### Judge Briefing
+- Panel composition and what they collectively value
+- Anticipated questions per track
+- Demo talking points calibrated to this panel
+
+### Execution Plan
+- Recommended tracks to enter (ranked)
+- Hour-by-hour timeline for the hackathon duration
+- Feature freeze point and submission preparation plan
+
+### Pitch Preparation
+- Opening line (3 seconds: what is this?)
+- Hook (30 seconds: why should judges care?)
+- Demo flow (90 seconds: what to show)
+- Landing (30 seconds: where does this go?)
+
+Use owner "situation-room" for write_section.
+Ground every recommendation in specific research from the map."""
 
 # ---------------------------------------------------------------------------
-# Result dataclass
+# Phase tool mapping
 # ---------------------------------------------------------------------------
+
+_PHASE_TOOLS: dict[str, list[str]] = {
+    "overview": [
+        "mcp__tools__fetch_page",
+        "mcp__tools__check_link",
+        "mcp__tools__search_web",
+        "mcp__tools__write_section",
+    ],
+    "track": [
+        "mcp__tools__fetch_page",
+        "mcp__tools__check_link",
+        "mcp__tools__search_web",
+        "mcp__tools__fetch_github_repo",
+        "mcp__tools__search_github_repos",
+        "mcp__tools__write_section",
+    ],
+    "sponsor": [
+        "mcp__tools__fetch_page",
+        "mcp__tools__check_link",
+        "mcp__tools__search_web",
+        "mcp__tools__fetch_github_user",
+        "mcp__tools__fetch_github_repo",
+        "mcp__tools__write_section",
+    ],
+    "judge": [
+        "mcp__tools__fetch_page",
+        "mcp__tools__search_web",
+        "mcp__tools__fetch_github_user",
+        "mcp__tools__write_section",
+    ],
+    "past": [
+        "mcp__tools__fetch_page",
+        "mcp__tools__search_web",
+        "mcp__tools__fetch_devpost_winners",
+        "mcp__tools__write_section",
+    ],
+    "strategy": [
+        "mcp__tools__read_section",
+        "mcp__tools__list_sections",
+        "mcp__tools__write_section",
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Phase budgets (max turns per phase type)
+# ---------------------------------------------------------------------------
+
+_PHASE_BUDGETS: dict[str, int] = {
+    "overview": 15,
+    "track": 10,
+    "sponsor": 8,
+    "judge": 6,
+    "past": 10,
+    "strategy": 20,
+}
+
+# Max concurrent agent subprocesses
+_MAX_CONCURRENT = 3
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PhaseResult:
+    """Result of running a single orchestrator phase."""
+
+    phase: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    turns: int = 0
+    sections_written: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class OverviewData:
+    """Structured data extracted from overview.md frontmatter."""
+
+    name: str = ""
+    tracks: list[dict] = field(default_factory=list)
+    sponsors: list[dict] = field(default_factory=list)
+    judges: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -114,7 +312,6 @@ def _format_hackathon_message(h: Hackathon) -> str:
         parts.append(f"Name: {h.name}")
     parts.append(f"URL: {h.url}")
     parts.append(f"Source: {h.source}")
-    # Only include format/location if they're not defaults (i.e., actually known)
     if h.format != Format.VIRTUAL or h.location != "Online":
         parts.append(f"Format: {h.format.value}")
         parts.append(f"Location: {h.location}")
@@ -136,27 +333,200 @@ def _format_hackathon_message(h: Hackathon) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool name list for allowed_tools
+# Phase server factory
 # ---------------------------------------------------------------------------
 
-_SITUATION_TOOLS = [
-    "mcp__tools__fetch_page",
-    "mcp__tools__check_link",
-    "mcp__tools__search_web",
-    "mcp__tools__fetch_github_user",
-    "mcp__tools__fetch_github_repo",
-    "mcp__tools__search_github_repos",
-    "mcp__tools__fetch_devpost_winners",
-    "mcp__tools__fetch_devpost_submission_reqs",
-    "mcp__tools__write_section",
-    "mcp__tools__read_section",
-    "mcp__tools__list_sections",
-    "mcp__tools__append_log",
-    "mcp__tools__submit_analysis",
-]
+
+def _create_phase_server(
+    phase: str,
+    http: httpx.AsyncClient,
+    map_root: str,
+    capture: ResultCapture,
+) -> dict:
+    """Create an MCP server with tools appropriate for a specific phase."""
+    tools = []
+
+    tool_names = _PHASE_TOOLS.get(phase, [])
+
+    # Include tool groups based on what this phase needs
+    if any("fetch_page" in t or "check_link" in t or "search_web" in t for t in tool_names):
+        tools.extend(_make_web_tools(http))
+    if any("github" in t for t in tool_names):
+        tools.extend(_make_github_tools(http))
+    if any("devpost" in t for t in tool_names):
+        tools.extend(_make_platform_tools(http))
+    if any("section" in t or "log" in t for t in tool_names):
+        tools.extend(_make_map_tools(map_root, capture))
+
+    return create_sdk_mcp_server(name=f"situation-{phase}", tools=tools)
+
 
 # ---------------------------------------------------------------------------
-# Core agent function
+# Phase runner
+# ---------------------------------------------------------------------------
+
+
+async def _run_phase(
+    phase_name: str,
+    system_prompt: str,
+    user_message: str,
+    *,
+    http_client: httpx.AsyncClient,
+    map_root: str,
+    model: str = "claude-sonnet-4-6",
+    max_turns: int | None = None,
+) -> PhaseResult:
+    """Run a single agent phase with focused tools and budget."""
+    if max_turns is None:
+        max_turns = _PHASE_BUDGETS.get(phase_name, 10)
+
+    capture = ResultCapture()
+    server = _create_phase_server(phase_name, http_client, map_root, capture)
+
+    options = ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        model=model,
+        mcp_servers={"tools": server},
+        allowed_tools=_PHASE_TOOLS.get(phase_name, []),
+        permission_mode="bypassPermissions",
+        max_turns=max_turns,
+    )
+
+    result = PhaseResult(phase=phase_name)
+
+    try:
+        async for message in query(prompt=user_message, options=options):
+            if isinstance(message, ResultMessage):
+                if message.usage:
+                    u = message.usage
+                    result.input_tokens = (
+                        u.get("input_tokens", 0)
+                        + u.get("cache_creation_input_tokens", 0)
+                        + u.get("cache_read_input_tokens", 0)
+                    )
+                    result.output_tokens = u.get("output_tokens", 0)
+                result.turns = message.num_turns
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        logger.debug("Phase %s ended with %s: %s", phase_name, type(e).__name__, e)
+        result.error = str(e)
+
+    result.sections_written = capture.sections_written
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Overview parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_overview(map_root: str) -> OverviewData:
+    """Parse overview.md YAML frontmatter to extract tracks, sponsors, judges."""
+    overview_path = os.path.join(map_root, "overview.md")
+    if not os.path.exists(overview_path):
+        return OverviewData()
+
+    text = Path(overview_path).read_text()
+
+    # Extract YAML frontmatter between --- markers
+    fm: dict = {}
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            try:
+                fm = yaml.safe_load(parts[1]) or {}
+            except yaml.YAMLError:
+                logger.warning("Failed to parse overview.md frontmatter")
+
+    return OverviewData(
+        name=fm.get("name", ""),
+        tracks=fm.get("tracks", []) or [],
+        sponsors=fm.get("sponsors", []) or [],
+        judges=fm.get("judges", []) or [],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Priors loading
+# ---------------------------------------------------------------------------
+
+
+def _load_priors() -> str:
+    """Load hackathon priors from knowledge/priors.md if it exists."""
+    priors_path = os.path.join(os.path.dirname(__file__), "..", "..", "knowledge", "priors.md")
+    priors_path = os.path.normpath(priors_path)
+    if os.path.exists(priors_path):
+        content = Path(priors_path).read_text()
+        return f"\n## Prior knowledge from past hackathons\n\n{content}\n"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Map reading for strategy synthesis
+# ---------------------------------------------------------------------------
+
+
+def _read_map_for_strategy(map_root: str) -> str:
+    """Read all map sections as context for the strategy agent."""
+    parts = []
+    root = Path(map_root)
+    if not root.is_dir():
+        return "(No research sections found)"
+
+    for md_file in sorted(root.rglob("*.md")):
+        if md_file.name == "research.md":
+            continue
+        rel = str(md_file.relative_to(root))
+        content = md_file.read_text()
+        parts.append(f"### {rel}\n\n{content}")
+
+    if not parts:
+        return "(No research sections found)"
+    return "\n\n---\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Result computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_confidence(phases: list[PhaseResult], overview: OverviewData) -> float:
+    """Compute confidence based on phase completion."""
+    if not phases:
+        return 0.3
+
+    completed = sum(1 for p in phases if p.error is None)
+    total = len(phases)
+    base = completed / total
+
+    # Boost if strategy phase completed
+    if any(p.phase == "strategy" and p.error is None for p in phases):
+        base = min(base + 0.1, 1.0)
+
+    return round(base, 2)
+
+
+def _compute_summary(
+    phases: list[PhaseResult],
+    overview: OverviewData,
+    result: SituationResult,
+) -> str:
+    """Generate summary from phase results."""
+    parts = []
+    if overview.tracks:
+        parts.append(f"{len(overview.tracks)} tracks identified")
+    completed = sum(1 for p in phases if p.error is None)
+    parts.append(f"{completed}/{len(phases)} phases completed")
+    parts.append(f"{len(result.sections_written)} sections written")
+    failed = [p for p in phases if p.error]
+    if failed:
+        parts.append(f"{len(failed)} phases had errors")
+    return ". ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Core orchestrator
 # ---------------------------------------------------------------------------
 
 
@@ -168,13 +538,21 @@ async def analyze(
     max_tool_calls: int = 200,
     http_client: httpx.AsyncClient | None = None,
 ) -> SituationResult:
-    """Run the Situation Room agent for a single hackathon.
+    """Run the orchestrated Situation Room pipeline.
+
+    Phases:
+        1. Overview — fetch event page, extract structure
+        2. Tracks — concurrent per-track research
+        3. Sponsors — concurrent per-sponsor research
+        4. Judges — concurrent per-judge research
+        5. Past — search for past editions and winners
+        6. Strategy — synthesize all research into actionable strategy
 
     Args:
         hackathon: The event to analyze.
         map_root: Directory for the semantic map. Defaults to ./events/<event_id>/.
         model: Claude model ID.
-        max_tool_calls: Safety limit (mapped to max_turns).
+        max_tool_calls: Total budget (informational — phases have individual budgets).
         http_client: httpx async client (injected for testing/sharing).
     """
     event_id = hackathon.event_id
@@ -191,72 +569,161 @@ async def analyze(
             headers={"User-Agent": "Mozilla/5.0 (compatible; hackathon-finder/0.1)"},
         )
 
-    capture = ResultCapture()
-    server = create_situation_server(http_client, map_root, capture)
-
-    options = ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
-        model=model,
-        mcp_servers={"tools": server},
-        allowed_tools=_SITUATION_TOOLS,
-        permission_mode="bypassPermissions",
-        max_turns=max_tool_calls,
-    )
-
-    prompt = _format_hackathon_message(hackathon)
     result = SituationResult(event_id=event_id, map_root=map_root)
+    all_phases: list[PhaseResult] = []
 
     try:
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, ResultMessage):
-                    if message.usage:
-                        u = message.usage
-                        result.input_tokens = (
-                            u.get("input_tokens", 0)
-                            + u.get("cache_creation_input_tokens", 0)
-                            + u.get("cache_read_input_tokens", 0)
-                        )
-                        result.output_tokens = u.get("output_tokens", 0)
-                    result.tool_calls = message.num_turns
-        except BaseException as e:
-            # CLIConnectionError, ExceptionGroup from TaskGroup, etc. — not fatal.
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
-            logger.debug("Query loop ended with %s: %s", type(e).__name__, e)
+        # Phase 1: Overview
+        logger.info("Phase 1/6: Overview")
+        overview_phase = await _run_phase(
+            "overview",
+            OVERVIEW_PROMPT,
+            _format_hackathon_message(hackathon),
+            http_client=http_client,
+            map_root=map_root,
+            model=model,
+        )
+        all_phases.append(overview_phase)
 
-        # Extract results from capture (works regardless of how the loop ended)
-        result.sections_written = capture.sections_written
+        # Parse overview to drive fan-out
+        overview = _parse_overview(map_root)
+        logger.info(
+            "Overview: %d tracks, %d sponsors, %d judges",
+            len(overview.tracks),
+            len(overview.sponsors),
+            len(overview.judges),
+        )
+
+        # Phase 2-5: Research (concurrent with semaphore)
+        sem = asyncio.Semaphore(_MAX_CONCURRENT)
+
+        async def _guarded_phase(
+            phase_name: str,
+            prompt: str,
+            message: str,
+            **kwargs,
+        ) -> PhaseResult:
+            async with sem:
+                return await _run_phase(
+                    phase_name,
+                    prompt,
+                    message,
+                    http_client=http_client,
+                    map_root=map_root,
+                    model=model,
+                    **kwargs,
+                )
+
+        research_tasks = []
+
+        # Tracks
+        for track in overview.tracks:
+            name = track.get("name", "unknown")
+            sponsor = track.get("sponsor", "")
+            prize = track.get("prize", "")
+            desc = track.get("description", "")
+            msg = (
+                f"Research this hackathon track:\n"
+                f"Track: {name}\n"
+                f"Sponsor: {sponsor}\n"
+                f"Prize: {prize}\n"
+                f"Description: {desc}\n"
+                f"Event URL: {hackathon.url}"
+            )
+            research_tasks.append(_guarded_phase("track", TRACK_PROMPT, msg))
+
+        # Sponsors
+        for sponsor in overview.sponsors:
+            name = sponsor.get("name", "unknown")
+            url = sponsor.get("url", "")
+            msg = (
+                f"Research this hackathon sponsor:\n"
+                f"Sponsor: {name}\n"
+                f"URL: {url}\n"
+                f"Event URL: {hackathon.url}"
+            )
+            research_tasks.append(_guarded_phase("sponsor", SPONSOR_PROMPT, msg))
+
+        # Judges
+        for judge in overview.judges:
+            name = judge.get("name", "unknown")
+            url = judge.get("url", "")
+            msg = (
+                f"Research this hackathon judge:\n"
+                f"Judge: {name}\n"
+                f"Profile: {url}\n"
+                f"Event URL: {hackathon.url}"
+            )
+            research_tasks.append(_guarded_phase("judge", JUDGE_PROMPT, msg))
+
+        # Past editions
+        event_name = hackathon.name or overview.name or hackathon.url
+        research_tasks.append(
+            _guarded_phase(
+                "past",
+                PAST_PROMPT,
+                f"Search for past editions and winners of: {event_name}\n"
+                f"Event URL: {hackathon.url}",
+            )
+        )
+
+        if research_tasks:
+            logger.info(
+                "Phase 2-5: %d research tasks (max %d concurrent)",
+                len(research_tasks),
+                _MAX_CONCURRENT,
+            )
+            research_results = await asyncio.gather(
+                *research_tasks, return_exceptions=True
+            )
+            for r in research_results:
+                if isinstance(r, PhaseResult):
+                    all_phases.append(r)
+                elif isinstance(r, BaseException):
+                    logger.warning("Research task failed: %s", r)
+
+        # Phase 6: Strategy synthesis
+        logger.info("Phase 6/6: Strategy synthesis")
+        priors = _load_priors()
+        strategy_prompt = STRATEGY_PROMPT.format(priors=priors)
+
+        # Pass map content as user message so the strategy agent
+        # can work even without read_section tool calls
+        map_content = _read_map_for_strategy(map_root)
+        strategy_msg = (
+            f"Synthesize a strategy for: {event_name}\n"
+            f"Event URL: {hackathon.url}\n\n"
+            f"## Research collected\n\n{map_content}"
+        )
+
+        strategy_phase = await _run_phase(
+            "strategy",
+            strategy_prompt,
+            strategy_msg,
+            http_client=http_client,
+            map_root=map_root,
+            model=model,
+        )
+        all_phases.append(strategy_phase)
+
+        # Aggregate results across all phases
+        for p in all_phases:
+            result.sections_written.extend(p.sections_written)
+            result.input_tokens += p.input_tokens
+            result.output_tokens += p.output_tokens
+            result.tool_calls += p.turns
 
         # Fallback: scan disk if capture missed sections
         if not result.sections_written and os.path.isdir(map_root):
-            from pathlib import Path
-
             result.sections_written = sorted(
                 str(p.relative_to(map_root))
                 for p in Path(map_root).rglob("*.md")
                 if p.name != "research.md"
             )
 
-        if capture.data:
-            inp = capture.data
-            result.summary = inp["summary"]
-            result.tracks_found = inp["tracks_found"]
-            result.confidence = inp["confidence"]
-        else:
-            if result.sections_written:
-                result.summary = (
-                    f"Agent wrote {len(result.sections_written)} sections "
-                    f"but did not call submit_analysis"
-                )
-                result.confidence = 0.5
-            else:
-                logger.warning(
-                    "Situation Room stopped without submitting for %s",
-                    hackathon.name,
-                )
-                result.summary = "Agent stopped without submitting analysis"
-                result.confidence = 0.3
+        result.tracks_found = len(overview.tracks)
+        result.confidence = _compute_confidence(all_phases, overview)
+        result.summary = _compute_summary(all_phases, overview, result)
 
         return result
     finally:
