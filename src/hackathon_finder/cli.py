@@ -84,6 +84,7 @@ def _filter_by_date(
 
 def _to_json_obj(h: Hackathon) -> dict:
     return {
+        "event_id": h.event_id,
         "name": h.name,
         "url": h.url,
         "source": h.source,
@@ -171,15 +172,12 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Validation layer (on by default)
     if do_validate:
-        from hackathon_finder.oauth import ensure_auth
-        ensure_auth()
-
         if not use_json:
             console.print(f"\n[bold]Validating {len(hackathons)} events...[/bold]")
 
         vresults = await validate_batch(
             hackathons,
-            skip_curated=False,
+            skip_curated=not args.no_skip_curated,
             model=args.model,
             on_progress=_progress_callback if not use_json else None,
         )
@@ -209,8 +207,50 @@ async def _run(args: argparse.Namespace) -> None:
             console.print(f"  [dim]{h.source:10}[/dim] {h.url}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Find hackathons — SF in-person and virtual")
+async def _run_analyze(args: argparse.Namespace) -> None:
+    from hackathon_finder.situation import analyze
+
+    hackathon = Hackathon(name="", url=args.url, source="manual")
+
+    result = await analyze(
+        hackathon,
+        model=args.model,
+        max_tool_calls=args.budget,
+        map_root=args.map_root,
+    )
+
+    if args.json:
+        print(json.dumps({
+            "event_id": result.event_id,
+            "map_root": result.map_root,
+            "sections_written": result.sections_written,
+            "summary": result.summary,
+            "tracks_found": result.tracks_found,
+            "confidence": result.confidence,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "tool_calls": result.tool_calls,
+        }, indent=2))
+    else:
+        print(f"\n{'='*60}")
+        print(f"Situation Room Analysis Complete")
+        print(f"{'='*60}")
+        print(f"Event ID: {result.event_id}")
+        print(f"Map root: {result.map_root}")
+        print(f"Tracks found: {result.tracks_found}")
+        print(f"Sections written: {len(result.sections_written)}")
+        print(f"Confidence: {result.confidence:.0%}")
+        print(f"Tokens: {result.input_tokens:,} input + {result.output_tokens:,} output")
+        print(f"Tool calls: {result.tool_calls}")
+        print(f"\nSummary:\n{result.summary}")
+        print(f"\nSections:")
+        for s in result.sections_written:
+            print(f"  - {s}")
+        print(f"\nFull analysis at: {result.map_root}")
+
+
+def _add_discover_args(parser: argparse.ArgumentParser) -> None:
+    """Add discover subcommand arguments to a parser."""
     parser.add_argument("--no-sf", action="store_true", help="Exclude SF in-person events")
     parser.add_argument("--no-virtual", action="store_true", help="Exclude virtual events")
     parser.add_argument("--source", type=str, help="Comma-separated sources (devpost,mlh,luma,eventbrite)")
@@ -221,8 +261,41 @@ def main():
     parser.add_argument("--after", type=str, metavar="YYYY-MM-DD", help="Exclude events starting before this date")
     parser.add_argument("--before", type=str, metavar="YYYY-MM-DD", help="Exclude events starting after this date")
     parser.add_argument("--no-validate", action="store_true", help="Skip validation layer")
-    parser.add_argument("--model", type=str, default="claude-haiku-4-5-20251001", help="Anthropic model for investigation (default: haiku)")
+    parser.add_argument("--no-skip-curated", action="store_true", help="Investigate all events including curated sources")
+    parser.add_argument(
+        "--model", type=str, default="claude-haiku-4-5-20251001",
+        help="Anthropic model for investigation (default: haiku)",
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Find hackathons — SF in-person and virtual")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # discover subcommand (default)
+    discover_parser = subparsers.add_parser("discover", help="Discover upcoming hackathons")
+    _add_discover_args(discover_parser)
+
+    # analyze subcommand
+    analyze_parser = subparsers.add_parser("analyze", help="Run Situation Room analysis on a hackathon URL")
+    analyze_parser.add_argument("url", help="Hackathon event URL to analyze")
+    analyze_parser.add_argument(
+        "--model", type=str, default="claude-sonnet-4-6",
+        help="Anthropic model ID (default: claude-sonnet-4-6)",
+    )
+    analyze_parser.add_argument("--budget", type=int, default=200, help="Safety limit for tool calls (default: 200)")
+    analyze_parser.add_argument(
+        "--map-root", type=str, default=None,
+        help="Directory for semantic map output (default: ./events/<event_id>/)",
+    )
+    analyze_parser.add_argument("--json", action="store_true", help="Output JSON instead of rich text")
+
+    # For backward compatibility: if no subcommand is given, add discover args to the
+    # top-level parser so that bare `hackathon-finder --json` etc. still work.
+    _add_discover_args(parser)
+
     args = parser.parse_args()
 
     if args.debug:
@@ -230,8 +303,17 @@ def main():
     else:
         logging.basicConfig(level=logging.WARNING)
 
+    # Default to discover behavior when no subcommand given
+    if args.command is None or args.command == "discover":
+        runner = _run(args)
+    elif args.command == "analyze":
+        runner = _run_analyze(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
     try:
-        asyncio.run(_run(args))
+        asyncio.run(runner)
     except KeyboardInterrupt:
         sys.exit(0)
 

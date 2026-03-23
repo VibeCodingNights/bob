@@ -86,7 +86,7 @@ class MLHSource(Source):
     async def fetch(self, sf: bool = True, virtual: bool = True) -> list[Hackathon]:
         results: list[Hackathon] = []
 
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 resp = await client.get(MLH_URL, headers={"User-Agent": UA})
                 resp.raise_for_status()

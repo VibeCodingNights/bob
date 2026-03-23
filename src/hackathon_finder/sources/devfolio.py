@@ -13,6 +13,7 @@ from hackathon_finder.sources.base import Source
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.devfolio.co/api/hackathons"
+MAX_PAGES = 50
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -126,6 +127,9 @@ class DevfolioSource(Source):
                         results.append(h)
 
                     page += 1
+                    if page > MAX_PAGES:
+                        logger.warning("Devfolio: hit page limit (%d), stopping", MAX_PAGES)
+                        break
 
         logger.info(f"Devfolio: found {len(results)} hackathons")
         return results

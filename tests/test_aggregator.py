@@ -1,9 +1,10 @@
 """Tests for the aggregator (dedup, sort)."""
 
+import asyncio
 from datetime import datetime, timezone
 
 
-from hackathon_finder.aggregator import deduplicate, sort_hackathons
+from hackathon_finder.aggregator import deduplicate, fetch_all, sort_hackathons
 from hackathon_finder.models import Hackathon
 
 
@@ -97,3 +98,43 @@ class TestSortHackathons:
         items = [_h("B"), _h("A")]
         result = sort_hackathons(items)
         assert [h.name for h in result] == ["A", "B"]
+
+
+class MockSource:
+    def __init__(self, name, hackathons=None, error=None):
+        self.name = name
+        self._hackathons = hackathons or []
+        self._error = error
+
+    async def fetch(self, sf=True, virtual=True):
+        if self._error:
+            raise self._error
+        return self._hackathons
+
+
+class TestFetchAll:
+    def test_fetch_all_aggregates_sources(self):
+        h1 = _h("Alpha", source="devpost")
+        h2 = _h("Beta", source="mlh")
+        source1 = MockSource("s1", hackathons=[h1])
+        source2 = MockSource("s2", hackathons=[h2])
+        result = asyncio.get_event_loop().run_until_complete(fetch_all([source1, source2]))
+        names = {h.name for h in result}
+        assert "Alpha" in names
+        assert "Beta" in names
+
+    def test_fetch_all_isolates_source_errors(self):
+        h1 = _h("Good", source="devpost")
+        failing = MockSource("bad", error=Exception("boom"))
+        working = MockSource("good", hackathons=[h1])
+        result = asyncio.get_event_loop().run_until_complete(fetch_all([failing, working]))
+        assert len(result) == 1
+        assert result[0].name == "Good"
+
+    def test_fetch_all_deduplicates(self):
+        h1 = _h("Same", source="devpost")
+        h2 = _h("Same", source="mlh")
+        source1 = MockSource("s1", hackathons=[h1])
+        source2 = MockSource("s2", hackathons=[h2])
+        result = asyncio.get_event_loop().run_until_complete(fetch_all([source1, source2]))
+        assert len(result) == 1

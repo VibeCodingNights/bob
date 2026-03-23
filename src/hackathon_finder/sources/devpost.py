@@ -13,6 +13,7 @@ from hackathon_finder.sources.base import Source
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://devpost.com/api/hackathons"
+MAX_PAGES = 50
 
 
 def _parse_date(date_str: str) -> datetime | None:
@@ -128,6 +129,9 @@ class DevpostSource(Source):
                     if page * 9 >= total:
                         break
                     page += 1
+                    if page > MAX_PAGES:
+                        logger.warning("Devpost: hit page limit (%d), stopping", MAX_PAGES)
+                        break
 
         logger.info(f"Devpost: found {len(results)} hackathons")
         return results

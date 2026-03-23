@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -51,6 +52,17 @@ class Hackathon:
         """Normalized key for cross-platform deduplication."""
         # Strip common suffixes, lowercase, collapse whitespace
         name = self.name.lower().strip()
-        for noise in (" hackathon", " hack", " 2026", " 2025"):
+        for noise in (" hackathon", " hack"):
             name = name.replace(noise, "")
+        name = re.sub(r'\s*20\d{2}\b', '', name)
         return "".join(name.split())
+
+    @property
+    def event_id(self) -> str:
+        """Stable canonical ID for this event, used as semantic map directory name."""
+        import hashlib
+        if self.start_date:
+            key = f"{self.dedup_key()}:{self.start_date.date().isoformat()}"
+        else:
+            key = self.url
+        return hashlib.sha256(key.encode()).hexdigest()[:12]

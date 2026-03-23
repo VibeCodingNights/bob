@@ -113,7 +113,7 @@ class EventbriteSource(Source):
         seen_urls: set[str] = set()
         headers = {"User-Agent": UA}
 
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             if sf:
                 try:
                     resp = await client.get(SF_SEARCH, headers=headers)

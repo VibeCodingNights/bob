@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
+import httpx
+
 from hackathon_finder.agent import InvestigationResult, TokenUsage, investigate
 from hackathon_finder.models import Hackathon
 
@@ -176,22 +178,22 @@ async def validate_batch(
         return results
 
     # --- Investigate: concurrent per-event agents ---
-    from anthropic import AsyncAnthropic
-    from hackathon_finder.oauth import get_auth
-
-    auth = get_auth()
-    shared_client = AsyncAnthropic(**auth.client_kwargs)
-
     _emit("investigation", f"Investigating {len(needs_investigation)} events...")
     sem = asyncio.Semaphore(concurrency)
     token_usage = TokenUsage()
+
+    http = httpx.AsyncClient(
+        timeout=10.0,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; hackathon-finder/0.1)"},
+    )
 
     async def _investigate_one(idx: int) -> tuple[int, InvestigationResult | Exception]:
         async with sem:
             try:
                 _emit("investigation", f"  → {hackathons[idx].name}")
                 inv = await investigate(
-                    hackathon=hackathons[idx], model=model, client=shared_client,
+                    hackathon=hackathons[idx], model=model, http_client=http,
                 )
                 return idx, inv
             except Exception as e:
@@ -202,7 +204,7 @@ async def validate_batch(
         tasks = [_investigate_one(i) for i in needs_investigation]
         inv_results = await asyncio.gather(*tasks)
     finally:
-        await shared_client.close()
+        await http.aclose()
 
     investigated = 0
     inv_rejected = 0

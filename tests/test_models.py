@@ -1,6 +1,7 @@
 """Tests for the Hackathon model."""
 
-
+import re
+from datetime import datetime
 
 from hackathon_finder.models import Format, Hackathon, RegistrationStatus
 
@@ -47,6 +48,40 @@ class TestHackathonModel:
         h1 = Hackathon(name="TreeHacks Hackathon", url="", source="devpost")
         h2 = Hackathon(name="TreeHacks Hack 2026", url="", source="mlh")
         assert h1.dedup_key() == h2.dedup_key()
+
+    def test_event_id_deterministic(self):
+        h = Hackathon(name="Test", url="https://example.com", source="devpost")
+        assert h.event_id == h.event_id
+
+    def test_event_id_unique(self):
+        h1 = Hackathon(name="Alpha", url="https://a.com", source="devpost")
+        h2 = Hackathon(name="Beta", url="https://b.com", source="devpost")
+        assert h1.event_id != h2.event_id
+
+    def test_event_id_with_start_date(self):
+        dt = datetime(2026, 6, 1, 12, 0)
+        h = Hackathon(name="HackDay", url="https://x.com", source="luma", start_date=dt)
+        # Should use dedup_key + date, so same name+date from different URL gives same ID
+        h2 = Hackathon(name="HackDay", url="https://y.com", source="devpost", start_date=dt)
+        assert h.event_id == h2.event_id
+
+    def test_event_id_without_start_date(self):
+        h1 = Hackathon(name="Same", url="https://a.com", source="devpost")
+        h2 = Hackathon(name="Same", url="https://b.com", source="devpost")
+        # Falls back to URL, so different URLs produce different IDs
+        assert h1.event_id != h2.event_id
+
+    def test_event_id_length(self):
+        h = Hackathon(name="Test", url="https://example.com", source="devpost")
+        assert len(h.event_id) == 12
+        assert re.fullmatch(r"[0-9a-f]{12}", h.event_id)
+
+    def test_event_id_different_urls_same_name(self):
+        dt = datetime(2026, 7, 15)
+        h1 = Hackathon(name="Global Hackathon", url="https://devpost.com/g", source="devpost", start_date=dt)
+        h2 = Hackathon(name="Global Hack 2026", url="https://mlh.io/g", source="mlh", start_date=dt)
+        # Both have start_dates and same dedup_key + date => same event_id (cross-platform dedup)
+        assert h1.event_id == h2.event_id
 
 
 class TestFormat:

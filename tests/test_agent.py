@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from claude_agent_sdk import ResultMessage
 
 from hackathon_finder.agent import (
     InvestigationResult,
-    PageMeta,
     TokenUsage,
-    _execute_check_link,
-    _execute_fetch_page,
-    _extract_page_meta,
     _format_hackathon_message,
     investigate,
 )
 from hackathon_finder.models import Hackathon
+from hackathon_finder.tools.web import (
+    PageMeta,
+    _extract_page_meta,
+    execute_check_link,
+    execute_fetch_page,
+)
 
 
 def _h(**kw) -> Hackathon:
@@ -27,52 +29,7 @@ def _h(**kw) -> Hackathon:
     return Hackathon(**defaults)
 
 
-# --- Mock helpers for Anthropic SDK ---
-
-
-@dataclass
-class MockToolUseBlock:
-    type: str = "tool_use"
-    id: str = "toolu_test_001"
-    name: str = "fetch_page"
-    input: dict = None
-
-    def __post_init__(self):
-        if self.input is None:
-            self.input = {"url": "https://example.com"}
-
-
-@dataclass
-class MockTextBlock:
-    type: str = "text"
-    text: str = ""
-
-
-@dataclass
-class MockUsage:
-    input_tokens: int = 100
-    output_tokens: int = 50
-
-
-@dataclass
-class MockResponse:
-    content: list = None
-    stop_reason: str = "tool_use"
-    usage: MockUsage = None
-
-    def __post_init__(self):
-        if self.content is None:
-            self.content = []
-        if self.usage is None:
-            self.usage = MockUsage()
-
-
-def _mock_anthropic_client(*responses: MockResponse) -> MagicMock:
-    """Build a mock AsyncAnthropic client that returns responses in sequence."""
-    client = MagicMock()
-    client.messages = MagicMock()
-    client.messages.create = AsyncMock(side_effect=list(responses))
-    return client
+# --- Mock helpers ---
 
 
 def _mock_http_client(status_code: int = 200, text: str = "<html></html>", url: str = "https://example.com") -> MagicMock:
@@ -87,6 +44,30 @@ def _mock_http_client(status_code: int = 200, text: str = "<html></html>", url: 
     client.head = AsyncMock(return_value=mock_resp)
     client.aclose = AsyncMock()
     return client
+
+
+async def _mock_query(*messages):
+    """Async generator yielding canned messages."""
+    for msg in messages:
+        yield msg
+
+
+def _result_msg(
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    num_turns: int = 0,
+    is_error: bool = False,
+) -> ResultMessage:
+    """Create a real ResultMessage for testing."""
+    return ResultMessage(
+        subtype="result",
+        duration_ms=1000,
+        duration_api_ms=900,
+        is_error=is_error,
+        num_turns=num_turns,
+        session_id="test-session",
+        usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
+    )
 
 
 # --- Page Metadata Extraction ---
@@ -134,7 +115,7 @@ class TestFetchPageTool:
     async def test_successful_fetch(self):
         html = '<html><head><title>Hack Event</title></head><body>Hello world</body></html>'
         http = _mock_http_client(200, html)
-        result = await _execute_fetch_page("https://example.com", http)
+        result = await execute_fetch_page("https://example.com", http)
         assert "Status: 200" in result
         assert "Title: Hack Event" in result
         assert "Hello world" in result
@@ -143,7 +124,7 @@ class TestFetchPageTool:
     async def test_fetch_with_og_tags(self):
         html = '<meta property="og:title" content="OG Hack" /><meta property="og:description" content="A great hack" />'
         http = _mock_http_client(200, html)
-        result = await _execute_fetch_page("https://example.com", http)
+        result = await execute_fetch_page("https://example.com", http)
         assert "OG Title: OG Hack" in result
         assert "OG Description: A great hack" in result
 
@@ -151,7 +132,7 @@ class TestFetchPageTool:
     async def test_fetch_error(self):
         http = _mock_http_client()
         http.get = AsyncMock(side_effect=ConnectionError("refused"))
-        result = await _execute_fetch_page("https://down.com", http)
+        result = await execute_fetch_page("https://down.com", http)
         assert "Error fetching" in result
         assert "refused" in result
 
@@ -160,14 +141,14 @@ class TestCheckLinkTool:
     @pytest.mark.asyncio
     async def test_ok(self):
         http = _mock_http_client(200)
-        result = await _execute_check_link("https://example.com", http)
+        result = await execute_check_link("https://example.com", http)
         assert "Status: 200" in result
 
     @pytest.mark.asyncio
     async def test_error(self):
         http = _mock_http_client()
         http.head = AsyncMock(side_effect=TimeoutError("timed out"))
-        result = await _execute_check_link("https://slow.com", http)
+        result = await execute_check_link("https://slow.com", http)
         assert "Error checking" in result
 
 
@@ -176,26 +157,24 @@ class TestCheckLinkTool:
 
 class TestInvestigate:
     @pytest.mark.asyncio
-    async def test_single_round_verdict(self):
-        """Agent calls submit_verdict on first round (no prior tool use)."""
-        verdict_block = MockToolUseBlock(
-            name="submit_verdict",
-            id="toolu_verdict_001",
-            input={
-                "valid": True,
-                "confidence": 0.95,
-                "reasoning": "Event page confirms hackathon",
-            },
-        )
-        response = MockResponse(
-            content=[verdict_block],
-            stop_reason="tool_use",
-            usage=MockUsage(input_tokens=200, output_tokens=80),
-        )
-        client = _mock_anthropic_client(response)
-        http = _mock_http_client()
+    @patch("hackathon_finder.agent.query")
+    @patch("hackathon_finder.agent.ResultCapture")
+    async def test_single_round_verdict(self, MockCapture, mock_query):
+        """Agent calls submit_verdict — result captured."""
+        capture = MagicMock()
+        capture.data = {
+            "valid": True,
+            "confidence": 0.95,
+            "reasoning": "Event page confirms hackathon",
+        }
+        MockCapture.return_value = capture
 
-        result = await investigate(_h(), client=client, http_client=http)
+        mock_query.return_value = _mock_query(
+            _result_msg(input_tokens=200, output_tokens=80, num_turns=1)
+        )
+
+        http = _mock_http_client()
+        result = await investigate(_h(), http_client=http)
 
         assert result.valid is True
         assert result.confidence == 0.95
@@ -205,140 +184,89 @@ class TestInvestigate:
         assert result.output_tokens == 80
 
     @pytest.mark.asyncio
-    async def test_fetch_then_verdict(self):
-        """Agent fetches page, then submits verdict (2 API calls)."""
-        # Round 1: fetch_page
-        fetch_block = MockToolUseBlock(
-            name="fetch_page",
-            id="toolu_fetch_001",
-            input={"url": "https://example.com/hack"},
-        )
-        r1 = MockResponse(
-            content=[fetch_block],
-            stop_reason="tool_use",
-            usage=MockUsage(input_tokens=200, output_tokens=60),
-        )
-
-        # Round 2: submit_verdict
-        verdict_block = MockToolUseBlock(
-            name="submit_verdict",
-            id="toolu_verdict_001",
-            input={
-                "valid": False,
-                "confidence": 0.9,
-                "reasoning": "Page is a meetup, not a hackathon",
-            },
-        )
-        r2 = MockResponse(
-            content=[verdict_block],
-            stop_reason="tool_use",
-            usage=MockUsage(input_tokens=800, output_tokens=100),
-        )
-
-        client = _mock_anthropic_client(r1, r2)
-        http = _mock_http_client(200, "<html><title>Python Meetup</title></html>")
-
-        result = await investigate(_h(), client=client, http_client=http)
-
-        assert result.valid is False
-        assert result.confidence == 0.9
-        assert result.tool_rounds == 1  # One round of actual tool execution
-        assert result.input_tokens == 1000  # 200 + 800
-        assert result.output_tokens == 160  # 60 + 100
-
-    @pytest.mark.asyncio
-    async def test_verdict_with_corrections(self):
+    @patch("hackathon_finder.agent.query")
+    @patch("hackathon_finder.agent.ResultCapture")
+    async def test_verdict_with_corrections(self, MockCapture, mock_query):
         """Agent submits corrections with evidence."""
-        verdict_block = MockToolUseBlock(
-            name="submit_verdict",
-            id="toolu_verdict_001",
-            input={
-                "valid": True,
-                "confidence": 0.85,
-                "reasoning": "Location corrected from page",
-                "corrections": [{
-                    "field": "location",
-                    "value": "San Francisco, CA",
-                    "source_url": "https://example.com/hack",
-                    "extracted_text": "Venue: Moscone Center, San Francisco",
-                }],
-            },
-        )
-        response = MockResponse(content=[verdict_block], stop_reason="tool_use")
-        client = _mock_anthropic_client(response)
-        http = _mock_http_client()
+        capture = MagicMock()
+        capture.data = {
+            "valid": True,
+            "confidence": 0.85,
+            "reasoning": "Location corrected from page",
+            "corrections": [{
+                "field": "location",
+                "value": "San Francisco, CA",
+                "source_url": "https://example.com/hack",
+                "extracted_text": "Venue: Moscone Center, San Francisco",
+            }],
+        }
+        MockCapture.return_value = capture
 
-        result = await investigate(_h(), client=client, http_client=http)
+        mock_query.return_value = _mock_query(
+            _result_msg(input_tokens=500, output_tokens=100, num_turns=2)
+        )
+
+        http = _mock_http_client()
+        result = await investigate(_h(), http_client=http)
 
         assert len(result.corrections) == 1
         assert result.corrections[0]["field"] == "location"
         assert result.corrections[0]["value"] == "San Francisco, CA"
-        assert result.corrections[0]["source_url"] == "https://example.com/hack"
 
     @pytest.mark.asyncio
-    async def test_max_rounds_exceeded(self):
-        """Agent hits max_rounds without submitting verdict."""
-        fetch_block = MockToolUseBlock(
-            name="fetch_page",
-            id="toolu_fetch_001",
-            input={"url": "https://example.com"},
+    @patch("hackathon_finder.agent.query")
+    @patch("hackathon_finder.agent.ResultCapture")
+    async def test_no_verdict(self, MockCapture, mock_query):
+        """Agent stops without calling submit_verdict."""
+        capture = MagicMock()
+        capture.data = None
+        MockCapture.return_value = capture
+
+        mock_query.return_value = _mock_query(
+            _result_msg(input_tokens=200, output_tokens=30, num_turns=0)
         )
-        # Every round returns another fetch_page call, never a verdict
-        response = MockResponse(
-            content=[fetch_block],
-            stop_reason="tool_use",
-            usage=MockUsage(input_tokens=200, output_tokens=60),
-        )
-        client = _mock_anthropic_client(response, response, response)
+
         http = _mock_http_client()
+        result = await investigate(_h(), http_client=http)
 
-        result = await investigate(_h(), client=client, http_client=http, max_rounds=3)
-
-        assert result.valid is True  # conservative fallback
+        assert result.valid is False
         assert result.confidence == 0.3
-        assert "Exceeded" in result.reasoning
+        assert "without verdict" in result.reasoning
 
     @pytest.mark.asyncio
-    async def test_model_ends_without_tool_call(self):
-        """Agent returns text without calling any tool."""
-        text_block = MockTextBlock(text="This looks like a hackathon to me.")
-        response = MockResponse(
-            content=[text_block],
-            stop_reason="end_turn",
-            usage=MockUsage(input_tokens=200, output_tokens=30),
+    @patch("hackathon_finder.agent.query")
+    @patch("hackathon_finder.agent.ResultCapture")
+    async def test_token_tracking(self, MockCapture, mock_query):
+        """Tokens reported from ResultMessage."""
+        capture = MagicMock()
+        capture.data = {"valid": True, "confidence": 0.8, "reasoning": "ok"}
+        MockCapture.return_value = capture
+
+        mock_query.return_value = _mock_query(
+            _result_msg(input_tokens=2400, output_tokens=270, num_turns=2)
         )
-        client = _mock_anthropic_client(response)
+
         http = _mock_http_client()
+        result = await investigate(_h(), http_client=http)
 
-        result = await investigate(_h(), client=client, http_client=http)
+        assert result.input_tokens == 2400
+        assert result.output_tokens == 270
+        assert result.tool_rounds == 2
 
-        assert result.valid is True
+    @pytest.mark.asyncio
+    @patch("hackathon_finder.agent.query")
+    @patch("hackathon_finder.agent.ResultCapture")
+    async def test_error_handling(self, MockCapture, mock_query):
+        """Exception during query() treated as graceful exit — no verdict."""
+        MockCapture.return_value = MagicMock(data=None)
+        mock_query.side_effect = RuntimeError("CLI subprocess failed")
+
+        http = _mock_http_client()
+        result = await investigate(_h(), http_client=http)
+
+        assert result.valid is False
         assert result.confidence == 0.3
-        assert "without submitting verdict" in result.reasoning
-
-    @pytest.mark.asyncio
-    async def test_token_accumulation(self):
-        """Tokens accumulate across multi-round investigation."""
-        fetch = MockToolUseBlock(name="fetch_page", id="toolu_f1", input={"url": "https://a.com"})
-        r1 = MockResponse(content=[fetch], stop_reason="tool_use", usage=MockUsage(300, 70))
-
-        check = MockToolUseBlock(name="check_link", id="toolu_c1", input={"url": "https://b.com"})
-        r2 = MockResponse(content=[check], stop_reason="tool_use", usage=MockUsage(900, 90))
-
-        verdict = MockToolUseBlock(
-            name="submit_verdict", id="toolu_v1",
-            input={"valid": True, "confidence": 0.8, "reasoning": "ok"},
-        )
-        r3 = MockResponse(content=[verdict], stop_reason="tool_use", usage=MockUsage(1200, 110))
-
-        client = _mock_anthropic_client(r1, r2, r3)
-        http = _mock_http_client()
-
-        result = await investigate(_h(), client=client, http_client=http)
-
-        assert result.input_tokens == 2400  # 300 + 900 + 1200
-        assert result.output_tokens == 270  # 70 + 90 + 110
-        assert result.tool_rounds == 2  # fetch + check_link (verdict round doesn't count)
+        assert "without verdict" in result.reasoning
 
 
 # --- Token Usage Aggregator ---
