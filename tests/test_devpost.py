@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pytest
 
-from hackathon_finder.models import Format, RegistrationStatus
-from hackathon_finder.sources.devpost import _parse_date, _parse_hackathon
+from bob.models import Format, RegistrationStatus
+from bob.sources.devpost import _parse_date, _parse_hackathon
 
 
 class TestParseDate:

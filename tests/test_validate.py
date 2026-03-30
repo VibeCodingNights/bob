@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from hackathon_finder.agent import InvestigationResult
-from hackathon_finder.models import Format, Hackathon, RegistrationStatus
-from hackathon_finder.validate import (
+from bob.agent import InvestigationResult
+from bob.models import Format, Hackathon, RegistrationStatus
+from bob.validate import (
     ValidationResult,
     apply_corrections,
     structural_score,
@@ -140,7 +140,7 @@ async def test_validate_batch_with_mock_agent():
 
     with (
         patch.dict(os.environ, _MOCK_ENV),
-        patch("hackathon_finder.validate.investigate", new_callable=AsyncMock) as mock_inv,
+        patch("bob.validate.investigate", new_callable=AsyncMock) as mock_inv,
     ):
         mock_inv.return_value = mock_result
         results = await validate_batch(hackathons, use_llm=True)
@@ -161,7 +161,7 @@ async def test_validate_batch_agent_error_fallback():
 
     with (
         patch.dict(os.environ, _MOCK_ENV),
-        patch("hackathon_finder.validate.investigate", new_callable=AsyncMock) as mock_inv,
+        patch("bob.validate.investigate", new_callable=AsyncMock) as mock_inv,
     ):
         mock_inv.side_effect = RuntimeError("API key missing")
         results = await validate_batch(hackathons, use_llm=True)
@@ -194,7 +194,7 @@ async def test_validate_batch_corrections_mapped():
 
     with (
         patch.dict(os.environ, _MOCK_ENV),
-        patch("hackathon_finder.validate.investigate", new_callable=AsyncMock) as mock_inv,
+        patch("bob.validate.investigate", new_callable=AsyncMock) as mock_inv,
     ):
         mock_inv.return_value = mock_result
         results = await validate_batch(hackathons, use_llm=True)

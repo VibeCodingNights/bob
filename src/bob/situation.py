@@ -15,16 +15,11 @@ from pathlib import Path
 
 import httpx
 import yaml
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    ToolUseBlock,
-    query,
-)
+from claude_agent_sdk import ClaudeAgentOptions
 
-from hackathon_finder.models import Format, Hackathon
-from hackathon_finder.tools.mcp import (
+from bob.models import Format, Hackathon
+from bob.telemetry import AgentSession, run_agent
+from bob.tools.mcp import (
     ResultCapture,
     _make_github_tools,
     _make_map_tools,
@@ -386,6 +381,7 @@ async def _run_phase(
     map_root: str,
     model: str = "claude-sonnet-4-6",
     max_turns: int | None = None,
+    event_id: str = "",
 ) -> PhaseResult:
     """Run a single agent phase with focused tools and budget."""
     if max_turns is None:
@@ -393,6 +389,10 @@ async def _run_phase(
 
     capture = ResultCapture()
     server = _create_phase_server(phase_name, http_client, map_root, capture)
+
+    session = AgentSession(
+        f"situation:{phase_name}:{event_id}", max_turns=max_turns,
+    )
 
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
@@ -408,36 +408,18 @@ async def _run_phase(
         max_turns=max_turns,
     )
 
-    result = PhaseResult(phase=phase_name)
+    phase_result = PhaseResult(phase=phase_name)
 
-    try:
-        async for message in query(prompt=user_message, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, ToolUseBlock):
-                        logger.debug("[%s] tool_use: %s", phase_name, block.name)
-            if isinstance(message, ResultMessage):
-                logger.debug(
-                    "[%s] result: turns=%d error=%s",
-                    phase_name, message.num_turns, message.is_error,
-                )
-                if message.usage:
-                    u = message.usage
-                    result.input_tokens += (
-                        u.get("input_tokens", 0)
-                        + u.get("cache_creation_input_tokens", 0)
-                        + u.get("cache_read_input_tokens", 0)
-                    )
-                    result.output_tokens += u.get("output_tokens", 0)
-                result.turns = message.num_turns
-    except BaseException as e:
-        if isinstance(e, (KeyboardInterrupt, SystemExit)):
-            raise
-        logger.debug("Phase %s ended with %s: %s", phase_name, type(e).__name__, e)
-        result.error = str(e)
+    agent_result = await run_agent(user_message, options, session)
 
-    result.sections_written = capture.sections_written
-    return result
+    phase_result.input_tokens = agent_result.input_tokens
+    phase_result.output_tokens = agent_result.output_tokens
+    phase_result.turns = agent_result.total_turns
+    if agent_result.error:
+        phase_result.error = agent_result.error
+
+    phase_result.sections_written = capture.sections_written
+    return phase_result
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +593,7 @@ async def analyze(
             http_client=http_client,
             map_root=map_root,
             model=model,
+            event_id=event_id,
         )
         all_phases.append(overview_phase)
 
@@ -640,6 +623,7 @@ async def analyze(
                     http_client=http_client,
                     map_root=map_root,
                     model=model,
+                    event_id=event_id,
                     **kwargs,
                 )
 
@@ -735,6 +719,7 @@ async def analyze(
             http_client=http_client,
             map_root=map_root,
             model=model,
+            event_id=event_id,
         )
         all_phases.append(strategy_phase)
 

@@ -1,7 +1,7 @@
 [project]
-name = "hackathon-finder"
-version = "0.1.0"
-description = "Find hackathons across platforms — in-person SF and virtual"
+name = "bob"
+version = "0.2.0"
+description = "Bob goes to hackathons and wins them"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
@@ -9,9 +9,13 @@ dependencies = [
     "httpx>=0.27.0,<1.0",
     "pyyaml>=6.0,<7.0",
     "rich>=13.0.0,<14.0",
+    "keyring>=25.0.0",
+    "platformdirs>=4.0.0",
+    "pyotp>=2.9.0",
 ]
 
 [project.optional-dependencies]
+# browser automation: pip install -e ../stealth-browser
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.25.0",
@@ -19,14 +23,14 @@ dev = [
 ]
 
 [project.scripts]
-hackathon-finder = "hackathon_finder.cli:main"
+bob = "bob.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hackathon_finder"]
+packages = ["src/bob"]
 
 [tool.ruff]
 line-length = 100

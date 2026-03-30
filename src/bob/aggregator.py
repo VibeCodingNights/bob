@@ -6,8 +6,8 @@ import asyncio
 import logging
 import re
 
-from hackathon_finder.models import Hackathon
-from hackathon_finder.sources.base import Source
+from bob.models import Hackathon
+from bob.sources.base import Source
 
 logger = logging.getLogger(__name__)
 

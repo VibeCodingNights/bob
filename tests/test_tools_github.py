@@ -7,8 +7,8 @@ import json
 import httpx
 import pytest
 
-import hackathon_finder.tools.github as github_module
-from hackathon_finder.tools.github import (
+import bob.tools.github as github_module
+from bob.tools.github import (
     GITHUB_TOOLS,
     execute_fetch_github_repo,
     execute_fetch_github_user,

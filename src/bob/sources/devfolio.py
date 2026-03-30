@@ -7,8 +7,8 @@ from datetime import datetime
 
 import httpx
 
-from hackathon_finder.models import Format, Hackathon, RegistrationStatus
-from hackathon_finder.sources.base import Source
+from bob.models import Format, Hackathon, RegistrationStatus
+from bob.sources.base import Source
 
 logger = logging.getLogger(__name__)
 

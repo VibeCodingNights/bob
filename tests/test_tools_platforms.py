@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import httpx
 
-from hackathon_finder.tools.platforms import (
+from bob.tools.platforms import (
     _is_devpost_url,
     execute_fetch_devpost_winners,
     execute_fetch_devpost_submission_reqs,
@@ -116,7 +116,7 @@ class MockClient:
 def _patch_retry(monkeypatch):
     async def _no_retry(coro_factory, url):
         return await coro_factory()
-    monkeypatch.setattr("hackathon_finder.tools.platforms._retry_http", _no_retry)
+    monkeypatch.setattr("bob.tools.platforms._retry_http", _no_retry)
 
 
 # ---------------------------------------------------------------------------

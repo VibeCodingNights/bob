@@ -10,10 +10,11 @@ import logging
 from dataclasses import dataclass, field
 
 import httpx
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions
 
-from hackathon_finder.models import Hackathon
-from hackathon_finder.tools.mcp import ResultCapture, create_investigation_server
+from bob.models import Hackathon
+from bob.telemetry import AgentSession, run_agent
+from bob.tools.mcp import ResultCapture, create_investigation_server
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,10 @@ async def investigate(
     capture = ResultCapture()
     server = create_investigation_server(http_client, capture)
 
+    session = AgentSession(
+        f"investigate:{hackathon.event_id}", max_turns=max_rounds,
+    )
+
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         model=model,
@@ -153,28 +158,9 @@ async def investigate(
     )
 
     prompt = _format_hackathon_message(hackathon)
-    total_input = 0
-    total_output = 0
-    num_turns = 0
 
     try:
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, ResultMessage):
-                    if message.usage:
-                        u = message.usage
-                        total_input = (
-                            u.get("input_tokens", 0)
-                            + u.get("cache_creation_input_tokens", 0)
-                            + u.get("cache_read_input_tokens", 0)
-                        )
-                        total_output = u.get("output_tokens", 0)
-                    num_turns = message.num_turns
-        except BaseException as e:
-            # CLIConnectionError, ExceptionGroup from TaskGroup, etc. — not fatal.
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
-            logger.debug("Query loop ended with %s: %s", type(e).__name__, e)
+        result = await run_agent(prompt, options, session)
 
         if capture.data:
             inp = capture.data
@@ -183,9 +169,9 @@ async def investigate(
                 confidence=inp["confidence"],
                 reasoning=inp["reasoning"],
                 corrections=inp.get("corrections", []),
-                input_tokens=total_input,
-                output_tokens=total_output,
-                tool_rounds=num_turns,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                tool_rounds=result.total_turns,
             )
 
         logger.warning(
@@ -195,9 +181,9 @@ async def investigate(
             valid=False,
             confidence=0.3,
             reasoning="Agent stopped without verdict — flagged for manual review",
-            input_tokens=total_input,
-            output_tokens=total_output,
-            tool_rounds=num_turns,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            tool_rounds=result.total_turns,
         )
     finally:
         if own_http:

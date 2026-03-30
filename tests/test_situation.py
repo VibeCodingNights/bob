@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
-from claude_agent_sdk import ResultMessage
 
-from hackathon_finder.models import Hackathon
-from hackathon_finder.situation import (
+from bob.models import Hackathon
+from bob.telemetry import AgentResult
+from bob.situation import (
     OverviewData,
     PhaseResult,
     SituationResult,
@@ -21,7 +21,7 @@ from hackathon_finder.situation import (
     _read_map_for_strategy,
     analyze,
 )
-from hackathon_finder.tools.mcp import ResultCapture
+from bob.tools.mcp import ResultCapture
 
 
 # ---------------------------------------------------------------------------
@@ -56,27 +56,20 @@ def _mock_http_client(
     return client
 
 
-async def _mock_query(*messages):
-    """Async generator yielding canned messages."""
-    for msg in messages:
-        yield msg
-
-
-def _result_msg(
+def _agent_result(
     input_tokens: int = 0,
     output_tokens: int = 0,
-    num_turns: int = 0,
-    is_error: bool = False,
-) -> ResultMessage:
-    """Create a real ResultMessage for testing."""
-    return ResultMessage(
-        subtype="result",
-        duration_ms=1000,
-        duration_api_ms=900,
-        is_error=is_error,
-        num_turns=num_turns,
-        session_id="test-session",
-        usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
+    total_turns: int = 0,
+    success: bool = True,
+    error: str | None = None,
+) -> AgentResult:
+    """Create an AgentResult for testing."""
+    return AgentResult(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_turns=total_turns,
+        success=success,
+        error=error,
     )
 
 
@@ -163,7 +156,7 @@ class TestLoadPriors:
         priors_dir.mkdir()
         (priors_dir / "priors.md").write_text("# Test priors\n- Pattern 1\n")
         with patch(
-            "hackathon_finder.situation._load_priors",
+            "bob.situation._load_priors",
             return_value="\n## Prior knowledge\n\n# Test priors\n- Pattern 1\n",
         ):
             result = _load_priors()
@@ -275,11 +268,12 @@ class TestComputeSummary:
 
 class TestAnalyzePipeline:
     @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    async def test_overview_only(self, mock_query, tmp_path):
+    @patch("bob.situation.AgentSession")
+    @patch("bob.situation.run_agent", new_callable=AsyncMock)
+    async def test_overview_only(self, mock_run_agent, MockSession, tmp_path):
         """Pipeline runs overview phase and returns result even without tracks."""
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=500, output_tokens=100, num_turns=3)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=500, output_tokens=100, total_turns=3
         )
 
         http = _mock_http_client()
@@ -292,16 +286,17 @@ class TestAnalyzePipeline:
         assert isinstance(result, SituationResult)
         assert result.event_id
         assert result.map_root == str(tmp_path)
-        # query() called at least for overview + past + strategy
-        assert mock_query.call_count >= 3
+        # run_agent called at least for overview + past + strategy
+        assert mock_run_agent.call_count >= 3
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    async def test_with_tracks(self, mock_query, tmp_path):
+    @patch("bob.situation.AgentSession")
+    @patch("bob.situation.run_agent", new_callable=AsyncMock)
+    async def test_with_tracks(self, mock_run_agent, MockSession, tmp_path):
         """Pipeline fans out per-track agents when overview has tracks."""
         call_count = 0
 
-        def mock_query_fn(*args, **kwargs):
+        async def mock_run_agent_fn(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             # On the first call (overview), write overview.md
@@ -314,11 +309,9 @@ class TestAnalyzePipeline:
                     sponsors=[{"name": "Uniswap", "url": "https://uniswap.org"}],
                     judges=[{"name": "Alice", "url": "https://github.com/alice"}],
                 )
-            return _mock_query(
-                _result_msg(input_tokens=200, output_tokens=50, num_turns=2)
-            )
+            return _agent_result(input_tokens=200, output_tokens=50, total_turns=2)
 
-        mock_query.side_effect = mock_query_fn
+        mock_run_agent.side_effect = mock_run_agent_fn
 
         http = _mock_http_client()
         result = await analyze(
@@ -334,12 +327,13 @@ class TestAnalyzePipeline:
         assert result.output_tokens == 50 * 6
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    async def test_phase_error_doesnt_crash(self, mock_query, tmp_path):
+    @patch("bob.situation.AgentSession")
+    @patch("bob.situation.run_agent", new_callable=AsyncMock)
+    async def test_phase_error_doesnt_crash(self, mock_run_agent, MockSession, tmp_path):
         """A failing research phase doesn't crash the pipeline."""
         call_count = 0
 
-        def mock_query_fn(*args, **kwargs):
+        async def mock_run_agent_fn(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -348,18 +342,17 @@ class TestAnalyzePipeline:
                     tmp_path,
                     tracks=[{"name": "DeFi", "sponsor": "Uni", "prize": "$5K"}],
                 )
-                return _mock_query(
-                    _result_msg(input_tokens=200, output_tokens=50, num_turns=2)
-                )
+                return _agent_result(input_tokens=200, output_tokens=50, total_turns=2)
             if call_count == 2:
-                # Track research fails
-                raise RuntimeError("CLI subprocess crashed")
+                # Track research fails — run_agent returns error
+                return _agent_result(
+                    input_tokens=50, output_tokens=10, total_turns=1,
+                    success=False, error="CLI subprocess crashed",
+                )
             # All other phases succeed
-            return _mock_query(
-                _result_msg(input_tokens=100, output_tokens=30, num_turns=1)
-            )
+            return _agent_result(input_tokens=100, output_tokens=30, total_turns=1)
 
-        mock_query.side_effect = mock_query_fn
+        mock_run_agent.side_effect = mock_run_agent_fn
 
         http = _mock_http_client()
         result = await analyze(
@@ -373,11 +366,12 @@ class TestAnalyzePipeline:
         assert "error" in result.summary.lower() or result.confidence < 1.0
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    async def test_disk_fallback(self, mock_query, tmp_path):
+    @patch("bob.situation.AgentSession")
+    @patch("bob.situation.run_agent", new_callable=AsyncMock)
+    async def test_disk_fallback(self, mock_run_agent, MockSession, tmp_path):
         """Sections on disk are detected even if capture missed them."""
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=100, output_tokens=30, num_turns=1)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=100, output_tokens=30, total_turns=1
         )
 
         # Pre-populate some files on disk
@@ -397,11 +391,12 @@ class TestAnalyzePipeline:
         assert len(result.sections_written) >= 2
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.situation.query")
-    async def test_default_map_root(self, mock_query):
+    @patch("bob.situation.AgentSession")
+    @patch("bob.situation.run_agent", new_callable=AsyncMock)
+    async def test_default_map_root(self, mock_run_agent, MockSession):
         """When map_root=None, defaults to ./events/<event_id>."""
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=100, output_tokens=30, num_turns=0)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=100, output_tokens=30, total_turns=0
         )
 
         h = _h()
@@ -452,7 +447,7 @@ class TestToolDispatch:
     async def test_fetch_page_via_mcp(self):
         """fetch_page MCP handler routes to web tool."""
         http = _mock_http_client()
-        from hackathon_finder.tools.mcp import _make_web_tools
+        from bob.tools.mcp import _make_web_tools
 
         tools = _make_web_tools(http)
         fetch_page = tools[0]
@@ -464,7 +459,7 @@ class TestToolDispatch:
     async def test_write_section_via_mcp(self, tmp_path):
         """write_section MCP handler tracks sections."""
         capture = ResultCapture()
-        from hackathon_finder.tools.mcp import _make_map_tools
+        from bob.tools.mcp import _make_map_tools
 
         tools = _make_map_tools(str(tmp_path), capture)
         write_section = tools[0]

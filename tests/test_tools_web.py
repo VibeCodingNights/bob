@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from hackathon_finder.tools.web import (
+from bob.tools.web import (
     SEARCH_WEB_TOOL,
     WEB_TOOLS,
     _cache,
@@ -158,7 +158,7 @@ class TestExecuteSearchWeb:
             ]
         )
 
-        with patch("hackathon_finder.tools.web.asyncio.sleep", new_callable=AsyncMock):
+        with patch("bob.tools.web.asyncio.sleep", new_callable=AsyncMock):
             result = await execute_search_web("hackathons", mock_client)
 
         assert "1. HackMIT 2026" in result
@@ -171,7 +171,7 @@ class TestExecuteSearchWeb:
             side_effect=httpx.ConnectError("connection refused"),
         )
 
-        with patch("hackathon_finder.tools.web.asyncio.sleep", new_callable=AsyncMock):
+        with patch("bob.tools.web.asyncio.sleep", new_callable=AsyncMock):
             result = await execute_search_web("hackathons", mock_client)
 
         assert "Error searching for 'hackathons'" in result
@@ -317,7 +317,7 @@ class TestCacheTTL:
         clear_cache()
 
     def test_expired_entry_returns_none(self, monkeypatch):
-        import hackathon_finder.tools.web as web_mod
+        import bob.tools.web as web_mod
 
         t = 1000.0
         monkeypatch.setattr(web_mod.time, "monotonic", lambda: t)
@@ -328,7 +328,7 @@ class TestCacheTTL:
         assert _cache_get("https://example.com", namespace="fetch_page") is None
 
     def test_not_expired_entry_returns_value(self, monkeypatch):
-        import hackathon_finder.tools.web as web_mod
+        import bob.tools.web as web_mod
 
         t = 1000.0
         monkeypatch.setattr(web_mod.time, "monotonic", lambda: t)
@@ -457,7 +457,7 @@ class TestSafeRedirectFetching:
     @pytest.mark.asyncio
     async def test_safe_get_follows_relative_redirect(self, monkeypatch):
         """_safe_get resolves relative Location via urljoin."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         redirect_resp = httpx.Response(
             302,
             headers={"location": "/final-page"},
@@ -480,7 +480,7 @@ class TestSafeRedirectFetching:
     @pytest.mark.asyncio
     async def test_safe_get_empty_location_returns_redirect(self, monkeypatch):
         """_safe_get returns the 302 as-is when Location header is empty."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         redirect_resp = httpx.Response(
             302,
             headers={},
@@ -496,7 +496,7 @@ class TestSafeRedirectFetching:
     @pytest.mark.asyncio
     async def test_safe_get_blocks_https_to_http_downgrade(self, monkeypatch):
         """_safe_get raises on HTTPS->HTTP redirect downgrade."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         redirect_resp = httpx.Response(
             302,
             headers={"location": "http://example.com/page"},
@@ -533,7 +533,7 @@ class TestExecuteFetchPage:
     @pytest.mark.asyncio
     async def test_successful_fetch(self, monkeypatch):
         """execute_fetch_page returns formatted result with status, title, text."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         resp = httpx.Response(
             200,
             text="<html><head><title>My Page</title></head><body>Hello</body></html>",
@@ -557,18 +557,18 @@ class TestExecuteFetchPage:
     @pytest.mark.asyncio
     async def test_network_error(self, monkeypatch):
         """execute_fetch_page returns error string on ConnectError."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
 
-        with patch("hackathon_finder.tools.web.asyncio.sleep", new_callable=AsyncMock):
+        with patch("bob.tools.web.asyncio.sleep", new_callable=AsyncMock):
             result = await execute_fetch_page("https://example.com/page", mock_client)
         assert "Error fetching" in result
 
     @pytest.mark.asyncio
     async def test_extracts_metadata(self, monkeypatch):
         """execute_fetch_page extracts title, OG tags, and JSON-LD Event."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         resp = httpx.Response(
             200,
             text=SAMPLE_HTML_WITH_META,
@@ -587,7 +587,7 @@ class TestExecuteFetchPage:
     @pytest.mark.asyncio
     async def test_cache_hit(self, monkeypatch):
         """execute_fetch_page serves from cache on second call."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         enable_cache(3600)
         try:
             resp = httpx.Response(
@@ -615,7 +615,7 @@ class TestExecuteCheckLink:
     @pytest.mark.asyncio
     async def test_successful_check(self, monkeypatch):
         """execute_check_link returns status for a 200 response."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         resp = httpx.Response(
             200,
             request=httpx.Request("HEAD", "https://example.com/link"),
@@ -636,7 +636,7 @@ class TestExecuteCheckLink:
     @pytest.mark.asyncio
     async def test_returns_final_url(self, monkeypatch):
         """execute_check_link includes the final URL in the result."""
-        monkeypatch.setattr("hackathon_finder.tools.web._validate_url", lambda url: None)
+        monkeypatch.setattr("bob.tools.web._validate_url", lambda url: None)
         resp = httpx.Response(
             200,
             request=httpx.Request("HEAD", "https://example.com/final-destination"),

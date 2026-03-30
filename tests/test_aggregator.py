@@ -4,8 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 
 
-from hackathon_finder.aggregator import deduplicate, fetch_all, sort_hackathons
-from hackathon_finder.models import Hackathon
+from bob.aggregator import deduplicate, fetch_all, sort_hackathons
+from bob.models import Hackathon
 
 
 def _h(name: str, source: str = "devpost", start: datetime | None = None, **kw) -> Hackathon:

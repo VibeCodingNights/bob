@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from hackathon_finder.models import Hackathon
+from bob.models import Hackathon
 
 
 class Source(ABC):

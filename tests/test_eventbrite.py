@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from hackathon_finder.models import Format, RegistrationStatus
-from hackathon_finder.sources.eventbrite import _extract_events, _extract_server_data, _parse_date
+from bob.models import Format, RegistrationStatus
+from bob.sources.eventbrite import _extract_events, _extract_server_data, _parse_date
 
 
 def _wrap_server_data(events: list[dict], pagination: dict | None = None) -> str:

@@ -12,7 +12,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from hackathon_finder.tools.web import _retry_http
+from bob.tools.web import _retry_http
 
 logger = logging.getLogger(__name__)
 

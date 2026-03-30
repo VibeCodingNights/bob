@@ -6,16 +6,16 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from claude_agent_sdk import ResultMessage
 
-from hackathon_finder.agent import (
+from bob.agent import (
     InvestigationResult,
     TokenUsage,
     _format_hackathon_message,
     investigate,
 )
-from hackathon_finder.models import Hackathon
-from hackathon_finder.tools.web import (
+from bob.models import Hackathon
+from bob.telemetry import AgentResult
+from bob.tools.web import (
     PageMeta,
     _extract_page_meta,
     execute_check_link,
@@ -46,27 +46,20 @@ def _mock_http_client(status_code: int = 200, text: str = "<html></html>", url: 
     return client
 
 
-async def _mock_query(*messages):
-    """Async generator yielding canned messages."""
-    for msg in messages:
-        yield msg
-
-
-def _result_msg(
+def _agent_result(
     input_tokens: int = 0,
     output_tokens: int = 0,
-    num_turns: int = 0,
-    is_error: bool = False,
-) -> ResultMessage:
-    """Create a real ResultMessage for testing."""
-    return ResultMessage(
-        subtype="result",
-        duration_ms=1000,
-        duration_api_ms=900,
-        is_error=is_error,
-        num_turns=num_turns,
-        session_id="test-session",
-        usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
+    total_turns: int = 0,
+    success: bool = True,
+    error: str | None = None,
+) -> AgentResult:
+    """Create an AgentResult for testing."""
+    return AgentResult(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_turns=total_turns,
+        success=success,
+        error=error,
     )
 
 
@@ -157,9 +150,10 @@ class TestCheckLinkTool:
 
 class TestInvestigate:
     @pytest.mark.asyncio
-    @patch("hackathon_finder.agent.query")
-    @patch("hackathon_finder.agent.ResultCapture")
-    async def test_single_round_verdict(self, MockCapture, mock_query):
+    @patch("bob.agent.AgentSession")
+    @patch("bob.agent.run_agent", new_callable=AsyncMock)
+    @patch("bob.agent.ResultCapture")
+    async def test_single_round_verdict(self, MockCapture, mock_run_agent, MockSession):
         """Agent calls submit_verdict — result captured."""
         capture = MagicMock()
         capture.data = {
@@ -169,8 +163,8 @@ class TestInvestigate:
         }
         MockCapture.return_value = capture
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=200, output_tokens=80, num_turns=1)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=200, output_tokens=80, total_turns=1
         )
 
         http = _mock_http_client()
@@ -184,9 +178,10 @@ class TestInvestigate:
         assert result.output_tokens == 80
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.agent.query")
-    @patch("hackathon_finder.agent.ResultCapture")
-    async def test_verdict_with_corrections(self, MockCapture, mock_query):
+    @patch("bob.agent.AgentSession")
+    @patch("bob.agent.run_agent", new_callable=AsyncMock)
+    @patch("bob.agent.ResultCapture")
+    async def test_verdict_with_corrections(self, MockCapture, mock_run_agent, MockSession):
         """Agent submits corrections with evidence."""
         capture = MagicMock()
         capture.data = {
@@ -202,8 +197,8 @@ class TestInvestigate:
         }
         MockCapture.return_value = capture
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=500, output_tokens=100, num_turns=2)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=500, output_tokens=100, total_turns=2
         )
 
         http = _mock_http_client()
@@ -214,16 +209,17 @@ class TestInvestigate:
         assert result.corrections[0]["value"] == "San Francisco, CA"
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.agent.query")
-    @patch("hackathon_finder.agent.ResultCapture")
-    async def test_no_verdict(self, MockCapture, mock_query):
+    @patch("bob.agent.AgentSession")
+    @patch("bob.agent.run_agent", new_callable=AsyncMock)
+    @patch("bob.agent.ResultCapture")
+    async def test_no_verdict(self, MockCapture, mock_run_agent, MockSession):
         """Agent stops without calling submit_verdict."""
         capture = MagicMock()
         capture.data = None
         MockCapture.return_value = capture
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=200, output_tokens=30, num_turns=0)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=200, output_tokens=30, total_turns=0
         )
 
         http = _mock_http_client()
@@ -234,16 +230,17 @@ class TestInvestigate:
         assert "without verdict" in result.reasoning
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.agent.query")
-    @patch("hackathon_finder.agent.ResultCapture")
-    async def test_token_tracking(self, MockCapture, mock_query):
-        """Tokens reported from ResultMessage."""
+    @patch("bob.agent.AgentSession")
+    @patch("bob.agent.run_agent", new_callable=AsyncMock)
+    @patch("bob.agent.ResultCapture")
+    async def test_token_tracking(self, MockCapture, mock_run_agent, MockSession):
+        """Tokens reported from AgentResult."""
         capture = MagicMock()
         capture.data = {"valid": True, "confidence": 0.8, "reasoning": "ok"}
         MockCapture.return_value = capture
 
-        mock_query.return_value = _mock_query(
-            _result_msg(input_tokens=2400, output_tokens=270, num_turns=2)
+        mock_run_agent.return_value = _agent_result(
+            input_tokens=2400, output_tokens=270, total_turns=2
         )
 
         http = _mock_http_client()
@@ -254,12 +251,15 @@ class TestInvestigate:
         assert result.tool_rounds == 2
 
     @pytest.mark.asyncio
-    @patch("hackathon_finder.agent.query")
-    @patch("hackathon_finder.agent.ResultCapture")
-    async def test_error_handling(self, MockCapture, mock_query):
-        """Exception during query() treated as graceful exit — no verdict."""
+    @patch("bob.agent.AgentSession")
+    @patch("bob.agent.run_agent", new_callable=AsyncMock)
+    @patch("bob.agent.ResultCapture")
+    async def test_error_handling(self, MockCapture, mock_run_agent, MockSession):
+        """run_agent returns error — no verdict."""
         MockCapture.return_value = MagicMock(data=None)
-        mock_query.side_effect = RuntimeError("CLI subprocess failed")
+        mock_run_agent.return_value = _agent_result(
+            success=False, error="CLI subprocess failed"
+        )
 
         http = _mock_http_client()
         result = await investigate(_h(), http_client=http)

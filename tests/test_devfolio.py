@@ -3,8 +3,8 @@
 
 import pytest
 
-from hackathon_finder.models import Format
-from hackathon_finder.sources.devfolio import _parse_hackathon, _parse_iso
+from bob.models import Format
+from bob.sources.devfolio import _parse_hackathon, _parse_iso
 
 
 class TestParseIso:

@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pytest
 
-from hackathon_finder.models import Format, RegistrationStatus
-from hackathon_finder.sources.mlh import _parse_event, _parse_iso, _DATA_PAGE_RE
+from bob.models import Format, RegistrationStatus
+from bob.sources.mlh import _parse_event, _parse_iso, _DATA_PAGE_RE
 
 
 class TestParseIso:

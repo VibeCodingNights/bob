@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from hackathon_finder.tools.map import (
+from bob.tools.map import (
     append_log,
     execute_map_tool,
     list_sections,

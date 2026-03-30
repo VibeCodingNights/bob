@@ -3,8 +3,8 @@
 
 import pytest
 
-from hackathon_finder.models import Format, Hackathon, RegistrationStatus
-from hackathon_finder.sources.luma import _parse_iso, _parse_luma_event, _is_hackathon, _hackathon_score
+from bob.models import Format, Hackathon, RegistrationStatus
+from bob.sources.luma import _parse_iso, _parse_luma_event, _is_hackathon, _hackathon_score
 
 
 class TestParseIso:

@@ -461,32 +461,187 @@ The architectural defense is modularity — clean API contracts defined upfront 
 - **Structural triage** — keyword scoring, duration signals, and curated-source confidence to filter non-hackathons before expensive agentic investigation.
 - **Agentic validation** — per-event investigation agent via the Claude Agent SDK. Each agent fetches pages, checks links, and submits a verdict with provenance: the source URL and the extracted text that supports each correction.
 
-### Situation Room (built, needs tuning)
+### Situation Room (battle-tested)
 
-- **8-phase workflow** — event page → overview → tracks → sponsors → judges → past winners → strategy synthesis → submit. Each phase produces markdown files with YAML frontmatter in a navigable semantic map.
+- **Orchestrated 6-phase pipeline** — overview → tracks → sponsors → judges → past winners → strategy synthesis. The overview agent writes YAML frontmatter with structured track/sponsor/judge arrays; Python parses this to fan out concurrent research agents per entity. Each phase gets its own agent, budget, and system prompt.
+- **Concurrent research with semaphore(3)** — after the overview phase, track/sponsor/judge/past-winner research runs in parallel, bounded by `asyncio.Semaphore(3)` to limit concurrent CLI subprocesses. Phase budgets: overview:15, track:10, sponsor:8, judge:6, past:10, strategy:20 max_turns.
 - **13 MCP tools** — web fetching (SSRF-safe, redirect-validated), GitHub API (user/repo/search), Devpost scraping (winners/submission requirements), semantic map operations (write/read/list/append with atomic writes and path traversal prevention).
-- **Claude Agent SDK integration** — both investigation and situation room agents run via `claude-agent-sdk` with in-process MCP servers, `bypassPermissions` mode, and cache-aware token tracking.
+- **Claude Agent SDK integration** — agents run via `claude-agent-sdk` with in-process MCP servers, `bypassPermissions` mode, and token tracking. Built-in CLI tools are blocked via `disallowed_tools` to enforce the MCP tool boundary.
+- **Battle-tested** — ETHGlobal Cannes: 9/9 phases completed, 9 sections written, 1.0 confidence, ~1.1M input tokens. Strategy output includes concrete project recommendations with prize capture estimates per track.
 
-The investigation agent pattern in `agent.py` — system prompt defining the role, tools for world interaction, multi-turn loop with token tracking, conservative fallback on failure, provenance on every claim — is the prototype for every agent in the system.
+The investigation agent pattern in `agent.py` — system prompt defining the role, tools for world interaction, multi-turn loop with token tracking, conservative fallback on failure, provenance on every claim — is the prototype for every agent in the system. The orchestrator in `situation.py` extends it to multi-agent coordination.
 
-### What needs work
+### SDK lessons learned
 
-The Situation Room's 8-phase prompt says "be thorough" and "don't skip phases" — these instructions compete. In battle testing with budget=30, the agent spent all turns on deep per-track research without reaching overview, sponsors, judges, past winners, or strategy synthesis. Even at budget=200, reliable completion of all phases hasn't been demonstrated. The fix is prompt engineering: phase-aware pacing that prioritizes breadth over depth-first exhaustion of any single phase.
+Two hard-won discoveries from battle testing:
 
-The playbook is empty. The architecture describes accumulated knowledge from past events feeding into strategic analysis. No hackathons have been entered yet, so the Situation Room operates without priors. The knowledge base can be seeded with curated research — platform patterns, sponsor tendencies, timing strategies — before the first live event.
+- **Stream close timeout.** The SDK closes stdin after `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` (default 60s), killing MCP tool calls for any phase lasting longer. Fix: `os.environ.setdefault("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "600000")` at module level, before any SDK imports. The `env` option in `ClaudeAgentOptions` only affects the CLI subprocess, not the SDK's Python process where the timeout is read.
+- **Built-in tool escape.** `allowed_tools` controls which MCP tools the agent can call, but doesn't restrict built-in Claude Code CLI tools. Without `disallowed_tools`, agents use Bash, Write, and WebFetch directly instead of the tracked MCP tools. Fix: block all 11 built-in tools via `disallowed_tools`.
+
+### Crew pipeline (built)
+
+The infrastructure between strategic analysis and building:
+
+- **Roster** (`roster/`) — `MemberProfile` with skills, interests, availability, presentation style, and a flexible `attributes: dict[str, str]` for arbitrary platform-specific data (email, wallet address, shirt size — whatever platforms demand). YAML persistence via `platformdirs` (OS-agnostic). Query by skill domain, availability window.
+- **Accounts** (`accounts/`) — `PlatformAccount` per member per platform (Devpost, ETHGlobal, GitHub, Luma, Devfolio). Fingerprint config (serialized stealth-browser `PlatformConfig`) bound to the account for cross-session consistency. Credentials isolated in OS keyring (macOS Keychain / Windows Credential Locker / Linux Secret Service) with `FileVault` fallback for CI. Session state (Patchright `storage_state` JSON) for login persistence.
+- **Personas** (`personas/`) — Event-scoped identity per team member. `WritingStyle` (readme voice, commit style, communication tone) varies by `PresentationStyle` enum. Same member gets distinct persona per hackathon to prevent cross-submission pattern matching.
+- **Browser tools** (`tools/browser.py`) — 7 MCP tools wrapping stealth-browser's Patchright async API. `BrowserSessionManager` holds live browser/context/page objects across tool calls within a phase. Import-guarded — module loads cleanly without stealth-browser installed.
+- **Team Composer** (`composer.py`) — Agent-based portfolio allocation. Reads the Situation Room semantic map + roster, runs a Claude agent that assigns members to tracks as execution plays (2–3), moonshots (1–2), and philosophical entries (1). Output: `PortfolioPlan` with `TrackAssignment` per track.
+- **Registration orchestrator** (`registration.py`) — Concurrent browser-automated sign-ups (`Semaphore(2)`). Platform-specific agent prompts (Devpost, ETHGlobal, Luma, generic fallback). Each registration gets its own browser session with the account's fingerprint binding. Escalation tools (`resolve_field`, `escalate`, `record_platform_field`) handle unknown form fields and teach the system for future registrations.
+
+### Adaptive registration (built)
+
+Registration forms vary wildly across platforms — and even across events on the same platform. Rather than hardcoding every possible field, the system learns what platforms need through experience:
+
+**Profile attributes are open-ended.** `MemberProfile.attributes` is a `dict[str, str]` — no predefined schema. The first time ETHGlobal asks for a wallet address, it becomes a key. Forever.
+
+**Escalation teaches the system.** When the registration agent encounters a form field it can't fill, it calls `resolve_field` to check the member's attributes, then `escalate` if missing. The escalation handler (pluggable — default is terminal I/O, replaceable with Slack/web/agent) surfaces the question to a human. The answer is written to both the member's profile and the `PlatformFieldRegistry`, so the system never asks the same question again for the same platform.
+
+**Pre-flight validation.** `bob register` cross-references the `PlatformFieldRegistry` against each member's `attributes` before launching browser agents. Known gaps are resolved in batch. Login readiness is checked — accounts without valid session state are flagged. `--force` bypasses the login check.
+
+**Profile data threading.** Registration agents receive the full member profile (attributes, skills, interests, persona bio) in their context, so they can fill forms with what's already known before escalating for what isn't.
+
+### Account lifecycle (built)
+
+**`bob account ensure <platform> <member_id>`** handles all three cases:
+
+1. **Account exists, session fresh** → return immediately
+2. **Account exists, session stale** → automated re-login, escalate only for 2FA/CAPTCHA
+3. **No account** → autonomous signup via stealth-browser agent
+
+**Signup agent** (`signup.py`) — Claude agent with browser tools navigates platform signup forms. Prefers OAuth over email/password (see Identity Architecture below). Fills fields from member attributes and generated credentials. Screenshots before every escalation. Marks account as "pending" during signup, "active" on success — failed signups are cleaned up and retried.
+
+**Automated login agent** (`autologin.py`) — loads stored credentials from vault, fills login forms via browser tools. 2FA codes resolved via TOTP resolver (no human needed when secret is stored). Falls back to interactive (headless=False) on failure.
+
+**Credential generation** (`accounts/credentials.py`) — `secrets.token_urlsafe` for passwords, stored in vault, fingerprint config generated per account. Credentials never logged or printed.
+
+**Browser tools** — 11 MCP tools wrapping stealth-browser's Patchright API: navigate, click, fill, extract_text, screenshot, close_session, create_session, save_session, evaluate, wait_for_navigation, select_option. Sessions persist across tool calls within a phase. `BrowserSessionManager` accepts `headless` parameter.
+
+**Pre-flight integration** — `bob register` calls `ensure_all_accounts()` after gap resolution. Missing accounts are created, stale sessions are refreshed, before any hackathon registration starts.
+
+### Resolver chain (built)
+
+`resolve_field` is a unified MCP tool backed by a `ResolverChain` — a dispatch over registered resolvers. The agent calls `resolve_field(field_name, member_id)` and the chain tries each resolver in order, returning the first non-None result. If all miss, returns "unknown" and the agent escalates.
+
+```
+resolve_field("2fa_code", "noot")
+  → AttributeResolver:  member.attributes["2fa_code"]       → miss
+  → TOTPResolver:        vault["noot-devpost-totp"]          → hit → pyotp.now() → "482937"
+  → return "482937"
+
+resolve_field("email", "noot")
+  → AttributeResolver:  member.attributes["email"]           → "noot@vcn.dev"
+  → return "noot@vcn.dev"
+
+resolve_field("shirt_size", "noot")
+  → all resolvers miss → return "unknown" → agent escalates
+```
+
+**Built-in resolvers** (cheapest first):
+- `AttributeResolver` — `member.attributes[field_name]`
+- `TOTPResolver` — vault TOTP secret → `pyotp.TOTP.now()` (lazy import, secret never logged)
+- `CredentialResolver` — vault password lookup
+
+New resolvers slot in without changing agent prompts or tool schemas. The escalation surface shrinks with every resolver added.
+
+### Identity architecture (designed, not yet built)
+
+Battle testing revealed the core identity problem: reCAPTCHA blocks direct email/password signup on Devpost because it detects the Chrome DevTools Protocol that Patchright uses for browser control. stealth-browser passes Cloudflare Turnstile but not Google's reCAPTCHA. This isn't fixable in JavaScript — it's a protocol-level signal.
+
+The solution isn't to defeat reCAPTCHA. It's to avoid it entirely.
+
+**OAuth as the primary authentication path.** Nearly every hackathon platform supports "Sign up with GitHub":
+
+| Platform | GitHub OAuth | Google OAuth | Email/Password |
+|----------|-------------|-------------|----------------|
+| Devpost | ✓ | ✓ | ✓ (reCAPTCHA) |
+| ETHGlobal | ✓ | — | ✓ + wallet |
+| Devfolio | ✓ | — | ✓ |
+| Luma | — | ✓ | magic link |
+| GitHub | — | — | ✓ (CAPTCHA) |
+
+GitHub is the root identity. One manually-created GitHub account unlocks every other platform via OAuth — no CAPTCHAs, no email verification, no per-platform password management. The OAuth flow is three clicks: "Sign up with GitHub" → authorize → done.
+
+**The identity graph:**
+
+```
+GitHub account (root — created manually once, profile warmed)
+  ├── OAuth → Devpost (auto-populates name, avatar, repos from GitHub)
+  ├── OAuth → ETHGlobal (auto-populates profile from GitHub)
+  ├── OAuth → Devfolio (auto-populates profile from GitHub)
+  └── (GitHub profile IS the hackathon identity)
+
+Google account (secondary — for platforms without GitHub OAuth)
+  └── OAuth → Luma
+```
+
+**Why this is architecturally significant:**
+
+1. **Profile warming is free.** When Bob signs up on Devpost via GitHub OAuth, Devpost auto-populates the profile — name, avatar, bio, linked repos. The "bare profile" problem vanishes. Bob's GitHub profile IS the profile, propagated everywhere through OAuth.
+
+2. **One session to maintain.** Instead of N independent email/password credentials with N session states, Bob maintains one GitHub session. If it expires, one re-login refreshes the root; OAuth flows on downstream platforms just work because they redirect through GitHub's auth.
+
+3. **The GitHub account is infrastructure, not just auth.** Hackathon projects live on GitHub. Judges click through to repos. The GitHub identity carries reputation — contribution history, stars, pinned repos. A Devpost submission linking to a GitHub org with real projects signals credibility in a way that an anonymous email signup never will.
+
+4. **Credential surface area collapses.** No per-platform passwords to generate, store, rotate, or leak. The vault stores one GitHub session + TOTP secret. OAuth tokens are ephemeral and platform-managed.
+
+**Auth strategy chain.** The signup agent tries authentication methods in order of preference, mirroring the resolver chain pattern:
+
+```
+Signup on Devpost:
+  → GitHubOAuthStrategy: find "Sign up with GitHub" button → click → authorize → done
+  → GoogleOAuthStrategy: find "Sign up with Google" → click → authorize → done
+  → EmailPasswordStrategy: fill form → handle CAPTCHA → verify email
+  → EscalateStrategy: human creates account manually
+
+Login on Devpost:
+  → SessionResumeStrategy: load storage_state → navigate → verify logged in → done
+  → GitHubOAuthStrategy: find "Log in with GitHub" → click → authorize → done
+  → EmailPasswordStrategy: fill form → TOTP for 2FA → done
+  → EscalateStrategy: human logs in manually
+```
+
+The strategy chain is learned per platform. After Bob signs up on Devpost via GitHub OAuth, the auth strategy registry records: "devpost supports github_oauth for signup." Next signup on Devpost tries that first. Same learning loop as the `PlatformFieldRegistry`.
+
+**What needs to be built:**
+
+1. **GitHub session as prerequisite.** `bob account ensure github bob` must succeed before any OAuth-dependent signups. This is the one manual step — create the GitHub account by hand, run `bob login bob-github` to save the session.
+2. **Auth strategy detection.** The signup agent's system prompt instructs: "Before filling any form, look for OAuth buttons ('Sign up with GitHub', 'Continue with GitHub', 'Log in with GitHub'). If found, prefer OAuth over the email/password form."
+3. **Auth strategy registry** (`~/.bob/auth_strategies/`). Records which auth methods work on which platforms. Same YAML persistence pattern as `PlatformFieldRegistry`.
+4. **OAuth session propagation.** After successful OAuth signup, the new platform's session state is saved. The GitHub session is implicitly re-validated.
+5. **GitHub profile warming agent.** After the GitHub account is created: fill bio, set avatar, pin repos, ensure the profile looks real. This runs once, not per-hackathon.
+
+The identity graph reduces Bob's external authentication surface to a single manually-created GitHub account. Everything downstream is automated through OAuth. The one human action — creating the GitHub account and completing its CAPTCHA — is a one-time cost that unlocks the entire platform ecosystem.
 
 ### Security posture
 
-Three rounds of security auditing have hardened the tool system:
+Four rounds of security auditing have hardened the system:
 - SSRF protection with DNS resolution, private IP blocking, redirect-hop validation, and HTTPS downgrade prevention
-- Path traversal prevention with symlink resolution and containment checks
+- Path traversal prevention with symlink resolution, containment checks, and `_safe_filename()` sanitization on all user-controlled IDs
 - Atomic file writes with pre-set permissions
 - URL validation (scheme, userinfo, hostname) for all external fetches
 - Pagination bounds, cache size limits, and rate limit awareness
+- Credential isolation: vault-backed storage, never in YAML, restrictive file permissions (0o600)
+- Browser fingerprint binding: deterministic per account, prevents cross-session detection
+- Credential leakage prevention: negative assertions verify sensitive fields never appear in agent prompts
+
+### Agent telemetry (designed, not yet built)
+
+Battle testing exposed a structural visibility gap: 7 agent modules (situation, investigation, signup, autologin, registration, composer, profile warming) each contain a copy-pasted `async for message in query()` loop with ad-hoc logging. When an agent fails, the only output is "ExceptionGroup" — no trace of what it did, what it saw, or where it got stuck. Browser agents are especially opaque — the agent could click the same button 40 times with no external indication.
+
+**AgentSession** — a structured event log per agent run. Every tool call, tool result, message, error, and escalation produces an `AgentEvent` written to a JSONL file as it happens (survives crashes). Fields: timestamp, agent name, turn number, event type, data dict.
+
+**`run_agent()`** — a unified query runner that replaces all 7 duplicated loops. Handles the `async for message in query()` iteration, token tracking, error handling, and telemetry in one place. Every agent module calls `run_agent()` instead of managing its own loop.
+
+**`instrument_tools()`** — wraps MCP tool handlers to log inputs and outputs automatically. No per-tool instrumentation needed — the wrapper captures tool name, args (redacting passwords), result summary, and duration.
+
+**Live terminal output** — during agent execution, prints a status line per turn: `[signup:bob:github] Turn 5/50 | browser_fill(#email) → ok | 12s elapsed`. Replaces the current silence between "Ensuring..." and "Failed."
+
+**Session logs** — persisted to `~/.bob/logs/{agent}-{timestamp}.jsonl`. `bob logs` CLI to replay. `bob logs --last` for the most recent.
 
 ### Test coverage
 
-356 tests. Full coverage of parsing, deduplication, scoring, agent behavior, tool security, and CLI. All agent tests use mocks — no API calls in CI.
+657 tests across discovery, analysis, crew pipeline, adaptive registration, account lifecycle, resolver chain, identity architecture, and CLI. All agent tests use mocks — no API calls in CI. Path traversal regression tests on all file-writing modules. Credential leakage negative assertions on all agent prompt paths.
 
 ---
 
@@ -494,16 +649,22 @@ Three rounds of security auditing have hardened the tool system:
 
 Each layer depends on the ones below it. Each is independently useful before the next one exists.
 
-**Now → Situation Room reliability.** The Situation Room exists but doesn't reliably complete its full workflow. The 8-phase prompt needs pacing: breadth-first across all phases before depth on any single one. The agent should write overview.md first (quick), do a single research pass on each track/sponsor/judge, synthesize strategy.md, then call submit_analysis — using remaining budget to deepen specific areas only after the full skeleton exists. `bob analyze <event-url>` must produce a complete, useful strategic breakdown every time to be independently valuable.
+**Done → Situation Room.** 6-phase orchestrated pipeline, battle-tested at 1.0 confidence. Four events analyzed (ETHGlobal Cannes, Grizzly Hacks III, HackAmerica, United Hacks V7).
 
-**Now → Seed the playbook.** The knowledge base is empty. The Situation Room operates without priors — no platform patterns, sponsor tendencies, or timing strategies. Curated research from past hackathon wins can seed `knowledge/data/` before the first live event. After that, each event Bob analyzes contributes back. The architecture's flywheel starts turning.
+**Done → Crew pipeline.** Roster (flexible attributes), accounts (fingerprint-bound), personas (event-scoped), composer, browser tools (11 MCP tools wrapping stealth-browser), registration orchestrator with escalation.
 
-**Then → Hacker Flowmapper.** VCN member profiles, capability matching, team composition recommendations. This turns Bob from a solo analyst into a community coordinator. `bob team <event-url>` suggests optimal VCN teams per track based on skills, interests, and availability. The casting system makes the flywheel possible.
+**Done → Adaptive registration.** Resolver chain (attribute + TOTP + credential), platform field registry, pre-flight validation, profile threading. The system learns what platforms need through experience.
 
-**Then → The build system.** Architect → builders → integrator → polisher. Demo-first development in sandboxed containers. This is technically ambitious but compositionally straightforward — it chains the agent patterns already established in discovery and analysis. The novel engineering is in the architect's ability to dynamically compose builder agents for unfamiliar tech stacks.
+**Done → Account lifecycle.** Signup agent, auto-login agent, `ensure_account` (3-way: fresh/stale/missing), credential generation. Pre-flight integration creates accounts and refreshes sessions before registration.
 
-**Then → Registration, submission, and comms.** Browser automation for platform interactions. Operationally important, architecturally routine — Playwright MCP for known platforms, adaptive browser agents for unknown ones, wrapped in the strategic intelligence that tells Bob what to register for and how to frame each submission.
+**Now → Identity architecture (OAuth cascade).** GitHub as root identity, OAuth into all downstream platforms. Auth strategy chain (GitHubOAuth → GoogleOAuth → EmailPassword → Escalate) mirrors the resolver chain. Auth strategy registry learns which methods work per platform. GitHub profile warming agent. One manual account creation unlocks the entire ecosystem.
 
-**Then → The control plane and learning loop.** Dashboard, cost controls, post-mortem automation, playbook accumulation. This is what turns Bob from a tool you run into a system that improves. The first hackathon Bob enters with a populated playbook will be meaningfully better than the first hackathon it enters without one.
+**Now → Battle test on a real hackathon.** United Hacks V7 (July 10, $26K). Complete the pipeline: `bob discover` → `bob analyze` (done, 1.0 confidence) → `bob team` → `bob account ensure` (via OAuth) → `bob register`. Every failure teaches the system.
 
-Each layer delivers value alone. The Situation Room helps VCN members think more clearly about hackathon strategy even before Bob can build. The Flowmapper helps VCN coordinate teams even before Bob can register or submit. Bob accretes capability without requiring the full vision to justify each step.
+**Then → Cost optimization.** ~1.1M input tokens per large-event analysis. Per-phase model selection (Haiku for entity research, Sonnet for strategy), prompt caching, and entity prioritization.
+
+**Then → The build system.** Architect → builders → integrator → polisher. Demo-first development. The novel engineering is dynamic builder composition for unfamiliar tech stacks.
+
+**Then → The control plane and learning loop.** Dashboard, cost controls, post-mortem automation, playbook accumulation.
+
+Each layer delivers value alone. Bob accretes capability without requiring the full vision to justify each step.

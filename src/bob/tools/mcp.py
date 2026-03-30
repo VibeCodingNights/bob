@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 
-from hackathon_finder.tools.github import (
+from bob.tools.github import (
     FETCH_GITHUB_REPO_TOOL,
     FETCH_GITHUB_USER_TOOL,
     SEARCH_GITHUB_REPOS_TOOL,
@@ -20,20 +20,20 @@ from hackathon_finder.tools.github import (
     execute_fetch_github_user,
     execute_search_github_repos,
 )
-from hackathon_finder.tools.map import (
+from bob.tools.map import (
     APPEND_LOG_TOOL,
     LIST_SECTIONS_TOOL,
     READ_SECTION_TOOL,
     WRITE_SECTION_TOOL,
     execute_map_tool,
 )
-from hackathon_finder.tools.platforms import (
+from bob.tools.platforms import (
     FETCH_DEVPOST_SUBMISSION_REQS_TOOL,
     FETCH_DEVPOST_WINNERS_TOOL,
     execute_fetch_devpost_submission_reqs,
     execute_fetch_devpost_winners,
 )
-from hackathon_finder.tools.web import (
+from bob.tools.web import (
     CHECK_LINK_TOOL,
     FETCH_PAGE_TOOL,
     SEARCH_WEB_TOOL,

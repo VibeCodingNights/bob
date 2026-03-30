@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from hackathon_finder.models import Format, RegistrationStatus
-from hackathon_finder.sources.meetup import _extract_apollo_state, _extract_events
+from bob.models import Format, RegistrationStatus
+from bob.sources.meetup import _extract_apollo_state, _extract_events
 
 
 def _build_next_data_html(apollo_state: dict) -> str:

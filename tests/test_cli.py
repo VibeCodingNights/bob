@@ -7,14 +7,14 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from hackathon_finder.cli import (
+from bob.cli import (
     _filter_by_date,
     _format_date,
     _normalize_utc,
     _to_json_obj,
     _add_discover_args,
 )
-from hackathon_finder.models import Format, Hackathon, RegistrationStatus
+from bob.models import Format, Hackathon, RegistrationStatus
 
 
 def _make(name="Test", **kwargs):

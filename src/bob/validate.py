@@ -15,8 +15,8 @@ from typing import Callable
 
 import httpx
 
-from hackathon_finder.agent import InvestigationResult, TokenUsage, investigate
-from hackathon_finder.models import Hackathon
+from bob.agent import InvestigationResult, TokenUsage, investigate
+from bob.models import Hackathon
 
 logger = logging.getLogger(__name__)
 
@@ -267,13 +267,13 @@ def apply_corrections(
             except (ValueError, TypeError):
                 pass
         if "format" in r.corrections:
-            from hackathon_finder.models import Format
+            from bob.models import Format
             try:
                 h.format = Format(r.corrections["format"])
             except ValueError:
                 pass
         if "registration_status" in r.corrections:
-            from hackathon_finder.models import RegistrationStatus
+            from bob.models import RegistrationStatus
             try:
                 h.registration_status = RegistrationStatus(r.corrections["registration_status"])
             except ValueError:

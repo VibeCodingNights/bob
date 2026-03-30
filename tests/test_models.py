@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 
-from hackathon_finder.models import Format, Hackathon, RegistrationStatus
+from bob.models import Format, Hackathon, RegistrationStatus
 
 
 class TestHackathonModel:

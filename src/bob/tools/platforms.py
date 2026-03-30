@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from hackathon_finder.tools.web import _html_to_text, _retry_http, _safe_get
+from bob.tools.web import _html_to_text, _retry_http, _safe_get
 
 logger = logging.getLogger(__name__)
 
