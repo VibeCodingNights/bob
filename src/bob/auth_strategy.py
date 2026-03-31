@@ -40,6 +40,7 @@ class StrategyRecord:
     name: str  # e.g. "github_oauth", "google_oauth", "email_password"
     action: str  # "signup" or "login"
     last_success: str  # ISO date
+    engine: str = "patchright"  # browser engine used: "patchright" or "native"
 
 
 @dataclass
@@ -50,6 +51,7 @@ class PlatformAuthInfo:
     known_strategies: list[str]  # ["github_oauth", "google_oauth", "email_password"]
     github_session_valid: bool
     google_session_valid: bool
+    preferred_engine: str = "patchright"  # engine that last succeeded
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,7 @@ class AuthStrategyRegistry:
                 name=d["name"],
                 action=d.get("action", "signup"),
                 last_success=d.get("last_success", ""),
+                engine=d.get("engine", "patchright"),
             )
             for d in data["strategies"]
         ]
@@ -95,7 +98,12 @@ class AuthStrategyRegistry:
         p = self._path(platform)
         data = {
             "strategies": [
-                {"name": r.name, "action": r.action, "last_success": r.last_success}
+                {
+                    "name": r.name,
+                    "action": r.action,
+                    "last_success": r.last_success,
+                    "engine": r.engine,
+                }
                 for r in records
             ]
         }
@@ -119,7 +127,11 @@ class AuthStrategyRegistry:
         return oauth + rest
 
     def record_success(
-        self, platform: str, strategy: str, action: str
+        self,
+        platform: str,
+        strategy: str,
+        action: str,
+        engine: str = "patchright",
     ) -> None:
         """Record that a strategy worked for signup/login on this platform."""
         records = self._load(platform)
@@ -129,14 +141,30 @@ class AuthStrategyRegistry:
         for r in records:
             if r.name == strategy and r.action == action:
                 r.last_success = today
+                r.engine = engine
                 found = True
                 break
         if not found:
             records.append(
-                StrategyRecord(name=strategy, action=action, last_success=today)
+                StrategyRecord(
+                    name=strategy, action=action,
+                    last_success=today, engine=engine,
+                )
             )
         self._save(platform, records)
-        log.info("Recorded auth success: %s/%s on %s", strategy, action, platform)
+        log.info(
+            "Recorded auth success: %s/%s on %s (engine=%s)",
+            strategy, action, platform, engine,
+        )
+
+    def get_preferred_engine(self, platform: str) -> str:
+        """Return the engine that last succeeded on this platform."""
+        records = self._load(platform)
+        # Return the engine from the most recent success
+        for r in sorted(records, key=lambda r: r.last_success, reverse=True):
+            if r.engine:
+                return r.engine
+        return "patchright"
 
     def get_auth_info(
         self,
@@ -163,6 +191,7 @@ class AuthStrategyRegistry:
             known_strategies=known,
             github_session_valid=github_valid,
             google_session_valid=google_valid,
+            preferred_engine=self.get_preferred_engine(platform),
         )
 
 

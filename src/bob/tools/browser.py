@@ -7,8 +7,10 @@ when it is not installed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +86,105 @@ def _dict_to_platform_config(d: dict) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Native engine wrappers — make sync StealthBrowser look like async Patchright
+# ---------------------------------------------------------------------------
+
+
+class AsyncNativeLocatorWrapper:
+    """Wraps StealthBrowser element interactions to match Patchright's Locator API."""
+
+    def __init__(self, sb: Any, selector: str):
+        self._sb = sb
+        self._selector = selector
+
+    @property
+    def first(self) -> "AsyncNativeLocatorWrapper":
+        return self  # native engine doesn't need .first
+
+    async def click(self) -> None:
+        await asyncio.to_thread(self._sb.click, self._selector)
+
+    async def fill(self, value: str) -> None:
+        await asyncio.to_thread(self._sb.fill, self._selector, value)
+
+    async def text_content(self) -> str | None:
+        return await asyncio.to_thread(self._sb.get_text, self._selector)
+
+    async def select_option(self, value: str) -> None:
+        # StealthBrowser has no select_option — use JS
+        script = (
+            f"document.querySelector('{self._selector}').value = "
+            f"'{value}';"
+            f"document.querySelector('{self._selector}')"
+            f".dispatchEvent(new Event('change', {{bubbles: true}}))"
+        )
+        await asyncio.to_thread(self._sb.execute_script, script)
+
+
+class AsyncNativePageWrapper:
+    """Makes a sync StealthBrowser look like an async Patchright Page for MCP tool handlers."""
+
+    def __init__(self, sb: Any):
+        self._sb = sb
+
+    async def goto(self, url: str, **kwargs: Any) -> None:
+        await asyncio.to_thread(self._sb.navigate, url)
+
+    def locator(self, selector: str) -> AsyncNativeLocatorWrapper:
+        return AsyncNativeLocatorWrapper(self._sb, selector)
+
+    async def evaluate(self, expression: str) -> Any:
+        return await asyncio.to_thread(self._sb.execute_script, expression)
+
+    async def wait_for_url(self, pattern: str, **kwargs: Any) -> None:
+        timeout = kwargs.get("timeout", 30000) / 1000
+        # Strip glob wildcards that Patchright uses
+        substring = pattern.strip("*")
+        await asyncio.to_thread(self._sb.wait_for_url, substring, timeout)
+
+    async def screenshot(self, **kwargs: Any) -> str:
+        path = kwargs.get("path", "")
+        return await asyncio.to_thread(self._sb.screenshot, path or None)
+
+    async def select_option(self, selector: str, value: str) -> None:
+        loc = self.locator(selector)
+        await loc.select_option(value)
+
+    @property
+    def url(self) -> str:
+        return self._sb.get_url()
+
+    async def title(self) -> str:
+        return await asyncio.to_thread(self._sb.get_title)
+
+
+class AsyncNativeContextWrapper:
+    """Wraps StealthBrowser to provide a context-like interface (storage_state)."""
+
+    def __init__(self, sb: Any):
+        self._sb = sb
+
+    async def storage_state(self, path: str | None = None) -> dict:
+        """Save browser state. Native engine uses profile_dir for persistence.
+
+        We extract cookies via JS and save them; localStorage is persisted
+        automatically by the browser profile directory.
+        """
+        import json
+
+        cookies_js = "JSON.stringify(document.cookie.split('; ').map(c => { let [k,v] = c.split('='); return {name:k, value:v||''}; }))"
+        cookies_str = await asyncio.to_thread(self._sb.execute_script, cookies_js)
+        cookies = json.loads(cookies_str) if cookies_str else []
+        state = {"cookies": cookies, "origins": []}
+        if path:
+            import pathlib
+
+            pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(path).write_text(json.dumps(state, indent=2))
+        return state
+
+
+# ---------------------------------------------------------------------------
 # BrowserSession + BrowserSessionManager
 # ---------------------------------------------------------------------------
 
@@ -91,10 +192,11 @@ def _dict_to_platform_config(d: dict) -> Any:
 @dataclass
 class BrowserSession:
     session_id: str
-    browser: Any  # Patchright Browser instance
-    context: Any  # Patchright BrowserContext
-    page: Any  # active Page
+    browser: Any  # Patchright Browser or StealthBrowser instance
+    context: Any  # Patchright BrowserContext or AsyncNativeContextWrapper
+    page: Any  # active Page or AsyncNativePageWrapper
     account_id: str | None = None
+    engine: str = "patchright"  # "patchright" or "native"
     created_at: float = field(default_factory=time.time)
 
 
@@ -126,8 +228,15 @@ def _find_chrome_binary() -> str:
     )
 
 
+def _find_free_port() -> int:
+    """Find a free TCP port by binding to port 0."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 async def launch_chrome_cdp(
-    port: int = 9222,
+    port: int = 0,
     headless: bool = False,
 ) -> tuple[Any, str]:
     """Launch Chrome via OS subprocess and return (process, cdp_endpoint).
@@ -141,6 +250,9 @@ async def launch_chrome_cdp(
     import tempfile
 
     import httpx
+
+    if port == 0:
+        port = _find_free_port()
 
     chrome = _find_chrome_binary()
     user_data = tempfile.mkdtemp(prefix="bob-chrome-")
@@ -185,6 +297,10 @@ class BrowserSessionManager:
     When ``os_launch=True``, Chrome is launched via ``subprocess.Popen`` (OS-level)
     instead of through Patchright. This produces zero automation artifacts —
     the browser binary was started by the OS, not by any framework.
+
+    When ``engine_default="native"``, sessions are created via stealth-browser's
+    unified StealthBrowser API instead of the Patchright layer. The native engine
+    uses Selenium under the hood and can run on Xvfb displays for headless servers.
     """
 
     def __init__(
@@ -192,11 +308,13 @@ class BrowserSessionManager:
         headless: bool = True,
         cdp_endpoint: str | None = None,
         os_launch: bool = False,
+        engine_default: str = "patchright",
     ) -> None:
         self._sessions: dict[str, BrowserSession] = {}
         self._headless = headless
         self._cdp_endpoint = cdp_endpoint
         self._os_launch = os_launch
+        self._engine_default = engine_default
         self._chrome_proc: Any | None = None  # OS-launched Chrome process
 
     async def create_session(
@@ -204,11 +322,79 @@ class BrowserSessionManager:
         session_id: str,
         fingerprint_config: dict | None = None,
         storage_state_path: str | None = None,
+        engine: str | None = None,
     ) -> BrowserSession:
-        _require_stealth_browser()
-
         if session_id in self._sessions:
             raise ValueError(f"Session already exists: {session_id}")
+
+        effective_engine = engine or self._engine_default
+
+        if effective_engine == "native":
+            return await self._create_native_session(
+                session_id, storage_state_path,
+            )
+
+        # Patchright path (default)
+        return await self._create_patchright_session(
+            session_id, fingerprint_config, storage_state_path,
+        )
+
+    async def _create_native_session(
+        self,
+        session_id: str,
+        storage_state_path: str | None = None,
+    ) -> BrowserSession:
+        """Create a session via stealth-browser's unified StealthBrowser API."""
+        try:
+            from stealth_browser import StealthBrowser
+        except ImportError:
+            raise RuntimeError(
+                "stealth-browser is not installed. "
+                "Install with: pip install stealth-browser"
+            )
+
+        profile_dir = None
+        if storage_state_path:
+            state_path = Path(storage_state_path)
+            if state_path.exists():
+                if state_path.name == "state.json":
+                    profile_dir = state_path.parent
+                else:
+                    import shutil
+                    import tempfile
+                    td = Path(tempfile.mkdtemp(prefix="bob-native-"))
+                    shutil.copy2(state_path, td / "state.json")
+                    profile_dir = td
+
+        sb = await asyncio.to_thread(
+            StealthBrowser,
+            headless=self._headless,
+            engine="native",
+            profile_dir=profile_dir,
+        )
+
+        page = AsyncNativePageWrapper(sb)
+        context = AsyncNativeContextWrapper(sb)
+
+        session = BrowserSession(
+            session_id=session_id,
+            browser=sb,
+            context=context,
+            page=page,
+            engine="native",
+        )
+        self._sessions[session_id] = session
+        log.info("Native browser session created: %s", session_id)
+        return session
+
+    async def _create_patchright_session(
+        self,
+        session_id: str,
+        fingerprint_config: dict | None = None,
+        storage_state_path: str | None = None,
+    ) -> BrowserSession:
+        """Create a session via the Patchright stealth-browser layer."""
+        _require_stealth_browser()
 
         # Reconstruct PlatformConfig for the context if provided
         platform_config = (
@@ -278,7 +464,10 @@ class BrowserSessionManager:
         if session is None:
             return
         try:
-            await close_stealth_browser(session.browser)
+            if session.engine == "native":
+                await asyncio.to_thread(session.browser.close)
+            else:
+                await close_stealth_browser(session.browser)
         except Exception as exc:
             log.warning("Error closing session %s: %s", session_id, exc)
         log.info("Browser session closed: %s", session_id)
@@ -510,7 +699,10 @@ def _make_browser_tools(
     async def navigate(args: dict) -> dict:
         try:
             session = await session_manager.get_session(args["session_id"])
-            await stealth_goto(session.page, args["url"])
+            if isinstance(session.page, AsyncNativePageWrapper):
+                await session.page.goto(args["url"])
+            else:
+                await stealth_goto(session.page, args["url"])
             title = await session.page.title()
             url = session.page.url
             return _resp(f"Navigated to: {url}\nTitle: {title}")

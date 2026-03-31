@@ -609,11 +609,13 @@ async def signup_account(
     safe_id = account.account_id.replace("/", "_").replace("\\", "_").replace("..", "_")
     session_state_path = str(sessions_dir / f"{safe_id}.json")
 
-    # Use OS-launched Chrome for platforms with aggressive TLS detection (GitHub)
-    # unless an explicit cdp_endpoint was provided
+    # Use native engine for platforms with aggressive TLS detection (GitHub)
+    # unless an explicit cdp_endpoint was provided (which implies OS-launched Chrome)
     os_launch = cdp_endpoint is None and platform in ("github",)
+    engine = "native" if platform in ("github",) else "patchright"
     session_manager = BrowserSessionManager(
         headless=headless, cdp_endpoint=cdp_endpoint, os_launch=os_launch,
+        engine_default=engine,
     )
     capture: dict = {}
 
