@@ -72,7 +72,7 @@ class TestAutoLogin:
 
         captured_prompt = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured_prompt["text"] = prompt
             server = options.mcp_servers["autologin"]
             confirm = _get_tool(server, "confirm_login")
@@ -104,7 +104,7 @@ class TestAutoLogin:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["user_message"] = prompt
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["autologin"]
@@ -132,7 +132,7 @@ class TestAutoLogin:
         registry = _make_registry(tmp_path)
         _make_account(registry)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             confirm = _get_tool(server, "confirm_login")
             await confirm.handler({"success": True})
@@ -169,7 +169,7 @@ class TestAutoLogin:
             escalation_called["field"] = field_name
             return "123456"
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             escalate = _get_tool(server, "escalate")
             result = await escalate.handler({
@@ -208,7 +208,7 @@ class TestAutoLogin:
         _make_account(registry)
         mock_fallback.return_value = True
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             confirm = _get_tool(server, "confirm_login")
             await confirm.handler({"success": False, "error": "CAPTCHA blocked"})
@@ -299,7 +299,7 @@ class TestAutoLoginOAuth:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["autologin"]
             confirm = _get_tool(server, "confirm_login")
@@ -328,7 +328,7 @@ class TestAutoLoginOAuth:
 
         tool_found = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             tool_names = [t.name for t in server["tools"]]
             tool_found["check_github_session"] = "check_github_session" in tool_names
@@ -358,7 +358,7 @@ class TestAutoLoginOAuth:
         _make_account(registry)
         auth_registry = _make_auth_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             record_tool = _get_tool(server, "record_auth_success")
             await record_tool.handler({"strategy_name": "github_oauth"})
@@ -405,7 +405,7 @@ class TestAutoLoginOAuth:
 
         check_result = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["autologin"]
             check_tool = _get_tool(server, "check_github_session")
             result = await check_tool.handler({})
@@ -453,7 +453,7 @@ class TestAutoLoginOAuth:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["autologin"]
             confirm = _get_tool(server, "confirm_login")

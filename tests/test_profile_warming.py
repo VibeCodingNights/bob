@@ -156,7 +156,7 @@ class TestWarmGitHubProfile:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["user_message"] = prompt
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["warming"]
@@ -199,7 +199,7 @@ class TestWarmGitHubProfile:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["system_prompt"] = options.system_prompt
             captured["user_message"] = prompt
             server = options.mcp_servers["warming"]
@@ -248,7 +248,7 @@ class TestWarmGitHubProfile:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["user_message"] = prompt
             server = options.mcp_servers["warming"]
             confirm = _get_tool(server, "confirm_warming")
@@ -287,7 +287,7 @@ class TestWarmGitHubProfile:
         mock_persona.bio_short = "Building cool things"
         mock_compose.return_value = mock_persona
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["warming"]
             confirm = _get_tool(server, "confirm_warming")
             await confirm.handler({"success": False, "error": "page not found"})

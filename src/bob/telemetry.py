@@ -45,7 +45,7 @@ class AgentResult:
 # Redaction
 # ---------------------------------------------------------------------------
 
-_REDACT_KEYS = {"password", "secret", "credential", "token", "totp"}
+_REDACT_KEYS = {"password", "secret", "credential", "token", "totp", "api_key"}
 
 
 def _redact(args: dict) -> dict:
@@ -263,9 +263,16 @@ async def run_agent(
     prompt: str,
     options: object,  # ClaudeAgentOptions
     session: AgentSession,
+    auth_env: dict | None = None,
 ) -> AgentResult:
     """Run a Claude Agent SDK query loop with structured telemetry."""
     from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock, query
+
+    # Merge auth env (e.g. ANTHROPIC_API_KEY) into options.env
+    if auth_env:
+        if not getattr(options, "env", None):
+            options.env = {}  # type: ignore[attr-defined]
+        options.env.update(auth_env)  # type: ignore[attr-defined]
 
     result = AgentResult(session_log_path=session.log_path)
     turn = 0

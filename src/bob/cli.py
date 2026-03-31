@@ -141,6 +141,17 @@ def _progress_callback(tier: str, message: str) -> None:
     console.print(f"  {icon}  {message}")
 
 
+def _get_auth_env() -> dict:
+    """Create AuthManager and return env dict for the active auth config."""
+    from bob.auth import AuthManager
+
+    try:
+        mgr = AuthManager()
+        return mgr.get_env()
+    except Exception:
+        return {}
+
+
 async def _run(args: argparse.Namespace) -> None:
     sources = [S() for S in ALL_SOURCES]
 
@@ -177,11 +188,13 @@ async def _run(args: argparse.Namespace) -> None:
         if not use_json:
             console.print(f"\n[bold]Validating {len(hackathons)} events...[/bold]")
 
+        auth_env = _get_auth_env()
         vresults = await validate_batch(
             hackathons,
             skip_curated=not args.no_skip_curated,
             model=args.model,
             on_progress=_progress_callback if not use_json else None,
+            auth_env=auth_env or None,
         )
         before_count = len(hackathons)
         hackathons = apply_corrections(hackathons, vresults)
@@ -214,11 +227,13 @@ async def _run_analyze(args: argparse.Namespace) -> None:
 
     hackathon = Hackathon(name="", url=args.url, source="manual")
 
+    auth_env = _get_auth_env()
     result = await analyze(
         hackathon,
         model=args.model,
         max_tool_calls=args.budget,
         map_root=args.map_root,
+        auth_env=auth_env or None,
     )
 
     if args.json:
@@ -276,12 +291,14 @@ async def _run_team(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     roster = RosterStore()
+    auth_env = _get_auth_env()
     plan = await compose_teams(
         event_url=args.url,
         map_root=map_root,
         roster=roster,
         model=args.model,
         max_turns=args.budget,
+        auth_env=auth_env or None,
     )
 
     # Save portfolio for downstream use by register
@@ -372,6 +389,7 @@ async def _run_register(args: argparse.Namespace) -> None:
     from bob.auth_strategy import AuthStrategyRegistry
 
     auth_registry = AuthStrategyRegistry()
+    auth_env = _get_auth_env()
 
     console.print("\n[bold]Pre-flight:[/] Ensuring all accounts are ready...")
     headless = getattr(args, "headless", True)
@@ -383,6 +401,7 @@ async def _run_register(args: argparse.Namespace) -> None:
         headless=headless,
         model=args.model,
         auth_registry=auth_registry,
+        auth_env=auth_env or None,
     )
     if account_results:
         console.print(f"[green]All {len(account_results)} account(s) ready.[/green]")
@@ -398,6 +417,7 @@ async def _run_register(args: argparse.Namespace) -> None:
         max_concurrent=args.concurrency,
         roster=roster,
         field_registry=field_registry,
+        auth_env=auth_env or None,
     )
 
     if args.json:
@@ -539,6 +559,7 @@ async def _run_account(args: argparse.Namespace) -> None:
         field_registry = PlatformFieldRegistry()
         auth_registry = AuthStrategyRegistry()
 
+        auth_env = _get_auth_env()
         console.print(f"Ensuring {args.platform} account for {args.member_id}...")
         account = await ensure_account(
             member_id=args.member_id,
@@ -549,6 +570,7 @@ async def _run_account(args: argparse.Namespace) -> None:
             headless=getattr(args, "headless", False),
             cdp_endpoint=getattr(args, "cdp_endpoint", None),
             auth_registry=auth_registry,
+            auth_env=auth_env or None,
         )
         if account:
             console.print(
@@ -582,12 +604,14 @@ async def _run_account(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
+        auth_env = _get_auth_env()
         console.print(f"Warming GitHub profile for {args.account_id}...")
         success = await warm_github_profile(
             account_id=args.account_id,
             roster=roster,
             registry=registry,
             model=getattr(args, "model", "claude-sonnet-4-6"),
+            auth_env=auth_env or None,
         )
         if success:
             console.print("[green]Profile warming complete.[/green]")
@@ -924,6 +948,84 @@ def _replay_session(path: Path) -> None:
     console.print()
 
 
+async def _run_auth(args: argparse.Namespace) -> None:
+    import subprocess
+
+    from bob.auth import AuthManager
+
+    auth_mgr = AuthManager()
+    action = getattr(args, "auth_action", None)
+
+    if action == "add-key":
+        config = auth_mgr.add_api_key(args.name, args.api_key)
+        console.print(f"[green]Added API key config:[/] {config.name}")
+        if auth_mgr.get_active() == config:
+            console.print(f"[dim]Set as active auth config[/dim]")
+
+    elif action == "add-oauth":
+        email_args = ["--email", args.email] if args.email else []
+        subprocess.run(["claude", "auth", "login"] + email_args, check=False)
+        config = auth_mgr.add_oauth(args.name, email=args.email)
+        console.print(f"[green]Added OAuth config:[/] {config.name}")
+        if auth_mgr.get_active() == config:
+            console.print(f"[dim]Set as active auth config[/dim]")
+
+    elif action == "list":
+        configs = auth_mgr.list_configs()
+        if not configs:
+            console.print("[dim]No auth configs found. Use `bob auth add-key` or `bob auth add-oauth`.[/dim]")
+            return
+        active = auth_mgr.get_active()
+        table = Table(show_header=True, header_style="bold", show_lines=False, pad_edge=False)
+        table.add_column("Name", style="bold white", max_width=20)
+        table.add_column("Method", width=10)
+        table.add_column("Email", max_width=30)
+        table.add_column("Active", width=8)
+        for c in configs:
+            marker = "[green]*[/green]" if active and c.name == active.name else ""
+            table.add_row(c.name, c.method.value, c.email or "", marker)
+        console.print()
+        console.print(table)
+        console.print(f"\n[dim]{len(configs)} config(s)[/dim]")
+
+    elif action == "use":
+        try:
+            auth_mgr.set_active(args.name)
+            console.print(f"[green]Active auth config set to:[/] {args.name}")
+        except KeyError:
+            console.print(f"[bold red]Error:[/] Auth config not found: {args.name}")
+            sys.exit(1)
+
+    elif action == "status":
+        active = auth_mgr.get_active()
+        if active is None:
+            console.print("[dim]No active auth config.[/dim]")
+            return
+        console.print(f"[bold]Active config:[/] {active.name} ({active.method.value})")
+        if active.email:
+            console.print(f"[bold]Email:[/] {active.email}")
+        env = auth_mgr.get_env()
+        if env.get("ANTHROPIC_API_KEY"):
+            console.print("[green]API key: configured[/green]")
+        elif active.method.value == "oauth":
+            console.print("[dim]OAuth: using CLI session[/dim]")
+            subprocess.run(
+                ["claude", "auth", "status"],
+                env={**os.environ, **env},
+                check=False,
+            )
+
+    elif action == "remove":
+        if auth_mgr.remove(args.name):
+            console.print(f"[green]Removed auth config:[/] {args.name}")
+        else:
+            console.print(f"[bold red]Error:[/] Auth config not found: {args.name}")
+            sys.exit(1)
+
+    else:
+        console.print("Usage: bob auth {add-key,add-oauth,list,use,status,remove}")
+
+
 async def _run_plan(args: argparse.Namespace) -> None:
     console.print("Planner not yet implemented. Coming soon.")
 
@@ -1067,6 +1169,28 @@ def main():
     logs_parser.add_argument("--failed", action="store_true", help="Show only sessions with errors")
     logs_parser.add_argument("--all", action="store_true", help="Show all sessions (default: last 20)")
 
+    # auth subcommand
+    auth_parser = subparsers.add_parser("auth", help="Manage Claude auth configurations")
+    auth_sub = auth_parser.add_subparsers(dest="auth_action")
+
+    auth_add_key = auth_sub.add_parser("add-key", help="Add an API key auth config")
+    auth_add_key.add_argument("name", help="Config name (e.g. 'personal', 'work')")
+    auth_add_key.add_argument("api_key", help="Anthropic API key")
+
+    auth_add_oauth = auth_sub.add_parser("add-oauth", help="Add an OAuth auth config (runs claude auth login)")
+    auth_add_oauth.add_argument("name", help="Config name (e.g. 'personal', 'work')")
+    auth_add_oauth.add_argument("--email", type=str, default=None, help="Email for OAuth login")
+
+    auth_sub.add_parser("list", help="List all auth configs")
+
+    auth_use = auth_sub.add_parser("use", help="Set the active auth config")
+    auth_use.add_argument("name", help="Config name to activate")
+
+    auth_sub.add_parser("status", help="Show active auth config and status")
+
+    auth_remove = auth_sub.add_parser("remove", help="Remove an auth config")
+    auth_remove.add_argument("name", help="Config name to remove")
+
     # plan subcommand (placeholder)
     subparsers.add_parser("plan", help="Run Planner (coming soon)")
 
@@ -1098,6 +1222,8 @@ def main():
         runner = _run_account(args)
     elif args.command == "logs":
         runner = _run_logs(args)
+    elif args.command == "auth":
+        runner = _run_auth(args)
     elif args.command == "plan":
         runner = _run_plan(args)
     else:

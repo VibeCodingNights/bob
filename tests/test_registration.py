@@ -268,7 +268,7 @@ class TestRegisterTeams:
     async def test_register_returns_report(self, mock_run_agent, MockSession, tmp_path):
         """Mocked agent calls confirm_registration, report is returned."""
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             tools = server["tools"]
             confirm = next(t for t in tools if t.name == "confirm_registration")
@@ -303,7 +303,7 @@ class TestRegisterTeams:
     async def test_register_token_tracking(self, mock_run_agent, MockSession, tmp_path):
         """Token counts accumulate across registrations."""
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             confirm = next(t for t in server["tools"] if t.name == "confirm_registration")
             await confirm.handler({"success": True})
@@ -389,7 +389,7 @@ class TestResolveField:
         roster = _make_roster(tmp_path)
         roster.save_member(_make_member("alice", {"wallet_address": "0xABC"}))
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             resolve = _get_tool(server, "resolve_field")
             result = await resolve.handler({"field_name": "wallet_address", "member_id": "alice"})
@@ -419,7 +419,7 @@ class TestResolveField:
         roster = _make_roster(tmp_path)
         roster.save_member(_make_member("alice", {}))
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             resolve = _get_tool(server, "resolve_field")
             result = await resolve.handler({"field_name": "shirt_size", "member_id": "alice"})
@@ -448,7 +448,7 @@ class TestResolveField:
         """resolve_field returns 'unknown' for nonexistent member."""
         roster = _make_roster(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             resolve = _get_tool(server, "resolve_field")
             result = await resolve.handler({"field_name": "email", "member_id": "ghost"})
@@ -484,7 +484,7 @@ class TestEscalateTool:
         async def mock_handler(field_name, description, context):
             return "0xDEADBEEF"
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             escalate = _get_tool(server, "escalate")
             result = await escalate.handler({
@@ -533,7 +533,7 @@ class TestRecordPlatformField:
         """record_platform_field adds field to PlatformFieldRegistry."""
         field_registry = _make_field_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             record = _get_tool(server, "record_platform_field")
             result = await record.handler({
@@ -590,7 +590,7 @@ class TestProfileDataThreading:
 
         captured_prompt = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured_prompt["text"] = prompt
             server = options.mcp_servers["registration"]
             confirm = _get_tool(server, "confirm_registration")
@@ -640,7 +640,7 @@ class TestProfileDataThreading:
 
         captured_prompt = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured_prompt["text"] = prompt
             server = options.mcp_servers["registration"]
             confirm = _get_tool(server, "confirm_registration")
@@ -673,7 +673,7 @@ class TestProfileDataThreading:
         async def noop_handler(f, d, c):
             return "test"
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             confirm = _get_tool(server, "confirm_registration")
             await confirm.handler({"success": True})
@@ -712,7 +712,7 @@ class TestFullEscalationFlow:
         async def mock_handler(field_name, description, context):
             return "0xNEWWALLET"
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["registration"]
             resolve = _get_tool(server, "resolve_field")
             escalate = _get_tool(server, "escalate")

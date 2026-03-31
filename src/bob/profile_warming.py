@@ -175,6 +175,7 @@ async def warm_github_profile(
     registry: AccountRegistry,
     model: str = "claude-sonnet-4-6",
     max_turns: int = 15,
+    auth_env: dict | None = None,
 ) -> bool:
     """Fill out a GitHub profile to make the account look real.
 
@@ -274,7 +275,7 @@ async def warm_github_profile(
     agent_session = AgentSession(f"warming:{account_id}", max_turns=max_turns)
 
     try:
-        result = await run_agent(user_message, options, agent_session)
+        result = await run_agent(user_message, options, agent_session, auth_env=auth_env)
 
         if result.error:
             logger.warning(

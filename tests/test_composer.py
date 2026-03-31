@@ -271,7 +271,7 @@ class TestComposeTeams:
             "budget_notes": "Full team allocated",
         }
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["composer"]
             tools = server["tools"]
             submit_tool = next(t for t in tools if t.name == "submit_portfolio")
@@ -320,7 +320,7 @@ class TestComposeTeams:
         """System prompt should contain serialized roster data."""
         captured_prompt = None
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             nonlocal captured_prompt
             captured_prompt = options.system_prompt
 

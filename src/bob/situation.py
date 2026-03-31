@@ -382,6 +382,7 @@ async def _run_phase(
     model: str = "claude-sonnet-4-6",
     max_turns: int | None = None,
     event_id: str = "",
+    auth_env: dict | None = None,
 ) -> PhaseResult:
     """Run a single agent phase with focused tools and budget."""
     if max_turns is None:
@@ -410,7 +411,7 @@ async def _run_phase(
 
     phase_result = PhaseResult(phase=phase_name)
 
-    agent_result = await run_agent(user_message, options, session)
+    agent_result = await run_agent(user_message, options, session, auth_env=auth_env)
 
     phase_result.input_tokens = agent_result.input_tokens
     phase_result.output_tokens = agent_result.output_tokens
@@ -548,6 +549,7 @@ async def analyze(
     model: str = "claude-sonnet-4-6",
     max_tool_calls: int = 200,
     http_client: httpx.AsyncClient | None = None,
+    auth_env: dict | None = None,
 ) -> SituationResult:
     """Run the orchestrated Situation Room pipeline.
 
@@ -594,6 +596,7 @@ async def analyze(
             map_root=map_root,
             model=model,
             event_id=event_id,
+            auth_env=auth_env,
         )
         all_phases.append(overview_phase)
 
@@ -624,6 +627,7 @@ async def analyze(
                     map_root=map_root,
                     model=model,
                     event_id=event_id,
+                    auth_env=auth_env,
                     **kwargs,
                 )
 
@@ -720,6 +724,7 @@ async def analyze(
             map_root=map_root,
             model=model,
             event_id=event_id,
+            auth_env=auth_env,
         )
         all_phases.append(strategy_phase)
 

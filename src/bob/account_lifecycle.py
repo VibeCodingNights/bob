@@ -56,6 +56,7 @@ async def ensure_account(
     cdp_endpoint: str | None = None,
     model: str = "claude-sonnet-4-6",
     auth_registry: AuthStrategyRegistry | None = None,
+    auth_env: dict | None = None,
 ) -> PlatformAccount | None:
     """Ensure member has a working account on platform.
 
@@ -125,6 +126,7 @@ async def ensure_account(
             headless=headless,
             cdp_endpoint=cdp_endpoint,
             auth_registry=auth_registry,
+            auth_env=auth_env,
         )
 
     # 3. Check session freshness
@@ -141,6 +143,7 @@ async def ensure_account(
             model,
             headless=headless,
             auth_registry=auth_registry,
+            auth_env=auth_env,
         )
         if not success:
             logger.warning(
@@ -170,6 +173,7 @@ async def ensure_all_accounts(
     cdp_endpoint: str | None = None,
     model: str = "claude-sonnet-4-6",
     auth_registry: AuthStrategyRegistry | None = None,
+    auth_env: dict | None = None,
 ) -> dict[str, PlatformAccount]:
     """Ensure all team members in portfolio have working accounts.
 
@@ -216,6 +220,7 @@ async def ensure_all_accounts(
             headless,
             model,
             auth_registry=auth_registry,
+            auth_env=auth_env,
         )
         if account:
             results[key] = account
@@ -238,6 +243,7 @@ async def ensure_all_accounts(
             headless,
             model,
             auth_registry=auth_registry,
+            auth_env=auth_env,
         )
         if account:
             results[key] = account

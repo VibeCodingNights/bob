@@ -133,6 +133,7 @@ async def validate_batch(
     model: str = "claude-haiku-4-5-20251001",
     concurrency: int = 5,
     on_progress: ProgressCallback | None = None,
+    auth_env: dict | None = None,
 ) -> list[ValidationResult]:
     """Triage → investigate → return results."""
     results = [ValidationResult(hackathon=h) for h in hackathons]
@@ -194,6 +195,7 @@ async def validate_batch(
                 _emit("investigation", f"  → {hackathons[idx].name}")
                 inv = await investigate(
                     hackathon=hackathons[idx], model=model, http_client=http,
+                    auth_env=auth_env,
                 )
                 return idx, inv
             except Exception as e:

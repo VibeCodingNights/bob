@@ -493,6 +493,7 @@ async def _run_registration(
     roster: RosterStore | None = None,
     field_registry: PlatformFieldRegistry | None = None,
     escalation_handler: EscalationHandler | None = None,
+    auth_env: dict | None = None,
 ) -> tuple[RegistrationResult, int, int]:
     """Run a single registration with its own browser session."""
     session_manager = BrowserSessionManager()
@@ -585,7 +586,7 @@ async def _run_registration(
     )
 
     try:
-        result = await run_agent(user_message, options, session)
+        result = await run_agent(user_message, options, session, auth_env=auth_env)
 
         if result.error:
             return (
@@ -638,6 +639,7 @@ async def register_teams(
     roster: RosterStore | None = None,
     field_registry: PlatformFieldRegistry | None = None,
     escalation_handler: EscalationHandler | None = None,
+    auth_env: dict | None = None,
 ) -> RegistrationReport:
     """Register all teams from a PortfolioPlan concurrently.
 
@@ -685,6 +687,7 @@ async def register_teams(
                 roster=roster,
                 field_registry=field_registry,
                 escalation_handler=escalation_handler,
+                auth_env=auth_env,
             )
 
     coros = [_guarded_registration(t) for t in tasks]

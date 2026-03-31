@@ -77,7 +77,7 @@ class TestSignupAccount:
         registry = _make_registry(tmp_path)
         field_registry = _make_field_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": True})
@@ -114,7 +114,7 @@ class TestSignupAccount:
 
         captured_prompt = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured_prompt["text"] = prompt
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
@@ -152,7 +152,7 @@ class TestSignupAccount:
 
         captured_options = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured_options["system_prompt"] = options.system_prompt
             captured_options["user_message"] = prompt
             server = options.mcp_servers["signup"]
@@ -196,7 +196,7 @@ class TestSignupAccount:
             escalation_called["field"] = field_name
             return "alice@escalated.com"
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": True})
@@ -231,7 +231,7 @@ class TestSignupAccount:
         registry = _make_registry(tmp_path)
         field_registry = _make_field_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": True})
@@ -264,7 +264,7 @@ class TestSignupAccount:
         registry = _make_registry(tmp_path)
         field_registry = _make_field_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": True})
@@ -338,7 +338,7 @@ class TestSignupAccount:
         registry = _make_registry(tmp_path)
         field_registry = _make_field_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": False, "error": "CAPTCHA blocked"})
@@ -381,7 +381,7 @@ class TestSignupOAuth:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
@@ -429,7 +429,7 @@ class TestSignupOAuth:
 
         check_result = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             check_tool = _get_tool(server, "check_github_session")
             result = await check_tool.handler({})
@@ -464,7 +464,7 @@ class TestSignupOAuth:
 
         check_result = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             check_tool = _get_tool(server, "check_github_session")
             result = await check_tool.handler({})
@@ -498,7 +498,7 @@ class TestSignupOAuth:
         field_registry = _make_field_registry(tmp_path)
         auth_registry = _make_auth_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             record_tool = _get_tool(server, "record_auth_success")
             await record_tool.handler({"strategy_name": "github_oauth"})
@@ -532,7 +532,7 @@ class TestSignupOAuth:
         field_registry = _make_field_registry(tmp_path)
         auth_registry = _make_auth_registry(tmp_path)
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")
             await confirm.handler({"success": True})
@@ -585,7 +585,7 @@ class TestSignupOAuth:
 
         captured = {}
 
-        async def fake_run_agent(prompt, options, session):
+        async def fake_run_agent(prompt, options, session, **kwargs):
             captured["system_prompt"] = options.system_prompt
             server = options.mcp_servers["signup"]
             confirm = _get_tool(server, "confirm_signup")

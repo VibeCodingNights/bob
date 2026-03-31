@@ -302,6 +302,7 @@ async def compose_teams(
     roster: RosterStore,
     model: str = "claude-sonnet-4-6",
     max_turns: int = 20,
+    auth_env: dict | None = None,
 ) -> PortfolioPlan:
     """Run the team composer agent.
 
@@ -354,7 +355,7 @@ async def compose_teams(
         f"then read strategy.md and the track files."
     )
 
-    result = await run_agent(user_message, options, session)
+    result = await run_agent(user_message, options, session, auth_env=auth_env)
 
     if capture.data is None:
         logger.warning("Composer agent did not call submit_portfolio")

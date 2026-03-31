@@ -124,6 +124,7 @@ async def investigate(
     model: str = "claude-haiku-4-5-20251001",
     max_rounds: int = 5,
     http_client: httpx.AsyncClient | None = None,
+    auth_env: dict | None = None,
 ) -> InvestigationResult:
     """Run an investigation agent for a single hackathon.
 
@@ -160,7 +161,7 @@ async def investigate(
     prompt = _format_hackathon_message(hackathon)
 
     try:
-        result = await run_agent(prompt, options, session)
+        result = await run_agent(prompt, options, session, auth_env=auth_env)
 
         if capture.data:
             inp = capture.data

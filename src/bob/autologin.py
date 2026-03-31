@@ -383,6 +383,7 @@ async def auto_login(
     max_turns: int = 20,
     headless: bool = True,
     auth_registry: AuthStrategyRegistry | None = None,
+    auth_env: dict | None = None,
 ) -> bool:
     """Attempt automated login using stored credentials.
 
@@ -476,7 +477,7 @@ async def auto_login(
     agent_session = AgentSession(f"autologin:{account_id}", max_turns=max_turns)
 
     try:
-        result = await run_agent(user_message, options, agent_session)
+        result = await run_agent(user_message, options, agent_session, auth_env=auth_env)
     finally:
         await session_manager.close_all()
 

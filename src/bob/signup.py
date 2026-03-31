@@ -528,6 +528,7 @@ async def signup_account(
     headless: bool = False,  # default non-headless for signup (CAPTCHAs)
     cdp_endpoint: str | None = None,
     auth_registry: AuthStrategyRegistry | None = None,
+    auth_env: dict | None = None,
 ) -> PlatformAccount | None:
     """Create a new platform account for a team member.
 
@@ -677,7 +678,7 @@ async def signup_account(
     )
 
     try:
-        result = await run_agent(user_message, options, agent_session)
+        result = await run_agent(user_message, options, agent_session, auth_env=auth_env)
 
         if result.error:
             logger.error(
