@@ -366,9 +366,11 @@ class BrowserSessionManager:
                     shutil.copy2(state_path, td / "state.json")
                     profile_dir = td
 
+        # Native engine always needs headless=False (uses OS-level input).
+        # On headless Linux, use Xvfb with DISPLAY set.
         sb = await asyncio.to_thread(
             StealthBrowser,
-            headless=self._headless,
+            headless=False,
             engine="native",
             profile_dir=profile_dir,
         )
